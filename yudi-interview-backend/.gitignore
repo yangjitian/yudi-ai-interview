@@ -1,0 +1,41 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.sw?
+*.swo
+
+# Environment variables - 重要：不要提交包含敏感信息的 .env 文件
+.env
+.env.local
+.env.*.local
+.env.example
+
+# Logs
+*.log
+logs/
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type check
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SQL
+sql/
+
+#Other
+alembic/
