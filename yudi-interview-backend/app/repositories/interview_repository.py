@@ -81,6 +81,16 @@ class InterviewRepository:
     await self.session.flush()
     return True
 
+  async def delete_by_resume_id(self, resume_id: int) -> None:
+    result = await self.session.execute(
+        select(InterviewSessionEntity).where(
+            InterviewSessionEntity.resume_id == resume_id
+        )
+    )
+    for entity in result.scalars().all():
+      await self.session.delete(entity)
+    await self.session.flush()
+
   async def update_status(
       self, session_id: str, status: str
   ) -> None:

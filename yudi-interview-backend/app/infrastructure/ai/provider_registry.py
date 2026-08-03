@@ -437,6 +437,16 @@ async def get_chat_client(provider_id: str | None = None) -> Any:
         return await _get_chat_client_locked(provider_id)
 
 
+def _resolve_chat_provider_id(provider_id: str | None) -> str | None:
+    if (
+        provider_id is None
+        or not provider_id.strip()
+        or provider_id.strip().lower() == "default"
+    ):
+        return _default_chat_provider_id
+    return provider_id
+
+
 async def _get_chat_client_locked(provider_id: str | None = None) -> Any:
     """
     获取 ChatClient（进程级单例，连接池跨请求复用）。
@@ -447,13 +457,18 @@ async def _get_chat_client_locked(provider_id: str | None = None) -> Any:
     3. max_retries=1 避免重试掩盖根因
     4. LANGCHAIN_OPENAI_TCP_KEEPALIVE=0 禁用代理握手延迟
     """
-    provider = provider_id or _default_chat_provider_id
+    provider = _resolve_chat_provider_id(provider_id)
     if not provider:
         raise BusinessException(
             ErrorCode.PROVIDER_CONFIG_READ_FAILED,
             "LLM Provider Registry 尚未初始化",
         )
-    log.info("[ChatClient] provider_id=%s, default_provider=%s", provider_id, provider)
+    log.info(
+        "[ChatClient] provider_id=%s, resolved_provider=%s, default_provider=%s",
+        provider_id,
+        provider,
+        _default_chat_provider_id,
+    )
 
     # 检查缓存（进程级单例）
     if provider in _client_cache:
@@ -603,7 +618,7 @@ async def _get_voice_chat_client_async_locked(provider_id: str | None = None) ->
 
     Task 1: 创建异步版本的 ChatClient，确保 astream 使用正确的连接池。
     """
-    provider = provider_id or _default_chat_provider_id
+    provider = _resolve_chat_provider_id(provider_id)
     if not provider:
         raise BusinessException(
             ErrorCode.PROVIDER_CONFIG_READ_FAILED,
@@ -647,13 +662,32 @@ async def get_direct_client(provider_id: str | None = None) -> httpx.AsyncClient
         return await _get_direct_client_locked(provider_id)
 
 
+async def get_direct_client_with_model(
+    provider_id: str | None = None,
+) -> tuple[httpx.AsyncClient, str]:
+  """获取直连 DashScope 的 httpx.AsyncClient 和模型名称。
+
+  用于流式调用场景，调用方需要同时拿到 HTTP 客户端和 model 名。
+  """
+  async with _registry_lock:
+    provider = _resolve_chat_provider_id(provider_id)
+    if not provider:
+      raise BusinessException(
+          ErrorCode.PROVIDER_CONFIG_READ_FAILED,
+          "LLM Provider Registry 尚未初始化",
+      )
+    config = _load_provider_config(provider)
+    client = await _get_direct_client_locked(provider)
+    return client, config["model"]
+
+
 async def _get_direct_client_locked(provider_id: str | None = None) -> httpx.AsyncClient:
     """
     获取直连 DashScope 的 httpx AsyncClient（进程级单例，HTTP/2 复用）。
 
     用于绕过 LangChain astream 的高初始化延迟，实测可将 TTFT 从 ~11s 降至 ~1s。
     """
-    provider = provider_id or _default_chat_provider_id
+    provider = _resolve_chat_provider_id(provider_id)
     if not provider:
         raise BusinessException(
             ErrorCode.PROVIDER_CONFIG_READ_FAILED,
@@ -669,7 +703,7 @@ async def _get_direct_client_locked(provider_id: str | None = None) -> httpx.Asy
             "Authorization": f"Bearer {config['api_key']}",
             "Content-Type": "application/json",
         },
-        http2=True,
+        # 注意：http2=True 需要 h2 包，当前环境未安装，启用会导致请求直接报错，回退 HTTP/1.1
         trust_env=False,
         timeout=httpx.Timeout(
             connect=float(os.getenv("LLM_DIRECT_CONNECT_TIMEOUT", "5")),
@@ -680,7 +714,7 @@ async def _get_direct_client_locked(provider_id: str | None = None) -> httpx.Asy
         limits=httpx.Limits(max_connections=10, max_keepalive_connections=5, keepalive_expiry=30.0),
     )
     _direct_http2_client_cache[provider] = client
-    log.info("[DirectClient] HTTP/2 client created: base_url=%s model=%s", config["base_url"], config["model"])
+    log.info("[DirectClient] client created: base_url=%s model=%s", config["base_url"], config["model"])
     return client
 
 
@@ -708,6 +742,7 @@ async def get_embedding_client(provider_id: str | None = None) -> Any:
         dimensions=config["embedding_dimensions"],
         api_key=config["api_key"],
         base_url=config["base_url"],
+        check_embedding_ctx_length=False,
     )
     _embedding_client_cache[provider] = client
     return client

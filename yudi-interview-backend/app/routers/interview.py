@@ -190,9 +190,13 @@ async def re_evaluate_session(
   answers = await repo.find_answers_by_session_id(session_id)
   reset_count = 0
   for answer in answers:
-    if answer.eval_status != "COMPLETED":
-      answer.eval_status = None
-      reset_count += 1
+    # Q-02 决策前没有可持久化的逐题失败状态，只能全量清空后重新评估。
+    answer.score = None
+    answer.feedback = None
+    answer.reference_answer = None
+    answer.key_points_json = None
+    answer.eval_status = None
+    reset_count += 1
 
   await db.commit()
 

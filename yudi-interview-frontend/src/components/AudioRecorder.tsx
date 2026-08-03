@@ -20,6 +20,7 @@ declare global {
 interface AudioRecorderProps {
   isRecording: boolean;
   disabled?: boolean;
+  prewarm?: boolean;
   onRecordingChange: (isRecording: boolean) => void;
   onRecordingStopped?: () => void;
   onAudioData: (audioData: string) => void;
@@ -31,6 +32,7 @@ interface AudioRecorderProps {
 export default function AudioRecorder({
   isRecording,
   disabled = false,
+  prewarm = false,
   onRecordingChange,
   onRecordingStopped,
   onAudioData,
@@ -53,6 +55,8 @@ export default function AudioRecorder({
   const recordingActiveRef = useRef(false);
   const startingRef = useRef(false);
   const stoppingRef = useRef(false);
+  const onPermissionDeniedRef = useRef(onPermissionDenied);
+  onPermissionDeniedRef.current = onPermissionDenied;
 
   const TARGET_SAMPLE_RATE = 16000;
 
@@ -95,7 +99,20 @@ export default function AudioRecorder({
     });
   }, []);
 
-  const cleanupRecordingResources = useCallback(async (updateVolume = true) => {
+  const requestMicrophoneStream = useCallback(() => (
+    navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    })
+  ), []);
+
+  const cleanupRecordingResources = useCallback(async (
+    updateVolume = true,
+    releaseMicrophone = true,
+  ) => {
     if (vadRef.current) {
       try {
         vadRef.current.pause();
@@ -141,7 +158,7 @@ export default function AudioRecorder({
       analyserRef.current = null;
     }
 
-    if (mediaStreamRef.current) {
+    if (releaseMicrophone && mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(track => track.stop());
       mediaStreamRef.current = null;
     }
@@ -157,6 +174,50 @@ export default function AudioRecorder({
       setVolume(0);
     }
   }, [flushPendingAudio]);
+
+  useEffect(() => {
+    if (!prewarm) {
+      if (!recordingActiveRef.current && mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(track => track.stop());
+        mediaStreamRef.current = null;
+      }
+      return;
+    }
+    if (mediaStreamRef.current?.active || startingRef.current || recordingActiveRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    startingRef.current = true;
+    setIsStarting(true);
+    const startedAt = performance.now();
+    void requestMicrophoneStream().then((stream) => {
+      if (cancelled || !mountedRef.current) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+      mediaStreamRef.current = stream;
+      console.info(`[AudioRecorder] microphone_prewarm=${(performance.now() - startedAt).toFixed(1)}ms`);
+    }).catch((error) => {
+      if (!cancelled && mountedRef.current) {
+        const message = isPermissionDeniedError(error)
+          ? '麦克风权限被拒绝，请在浏览器地址栏左侧或设置中允许使用麦克风，然后刷新页面重试'
+          : error instanceof Error ? error.message : '无法预热麦克风';
+        onPermissionDeniedRef.current?.(message);
+      }
+    }).finally(() => {
+      if (!cancelled) {
+        startingRef.current = false;
+        if (mountedRef.current) setIsStarting(false);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      startingRef.current = false;
+      if (mountedRef.current) setIsStarting(false);
+    };
+  }, [prewarm, requestMicrophoneStream]);
 
   const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
     const bytes = new Uint8Array(buffer);
@@ -182,13 +243,10 @@ export default function AudioRecorder({
 
       // Step 1: Request microphone — omit sampleRate so the browser uses device default
       const mediaStartedAt = performance.now();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      let stream = mediaStreamRef.current;
+      if (!stream?.active) {
+        stream = await requestMicrophoneStream();
+      }
       console.info(`[AudioRecorder] getUserMedia=${(performance.now() - mediaStartedAt).toFixed(1)}ms`);
 
       if (!mountedRef.current) {
@@ -312,7 +370,7 @@ export default function AudioRecorder({
     } catch (error) {
       startingRef.current = false;
       setIsStarting(false);
-      await cleanupRecordingResources(mountedRef.current);
+      await cleanupRecordingResources(mountedRef.current, true);
 
       if (!mountedRef.current) return;
 
@@ -336,7 +394,7 @@ export default function AudioRecorder({
       setIsStopping(true);
     }
     try {
-      await cleanupRecordingResources(mountedRef.current);
+      await cleanupRecordingResources(mountedRef.current, false);
       if (mountedRef.current) {
         if (isRecording) {
           onRecordingChange(false);
@@ -355,15 +413,15 @@ export default function AudioRecorder({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      void stopRecording();
+      void cleanupRecordingResources(false, true);
     };
-  }, []);
+  }, [cleanupRecordingResources]);
 
   useEffect(() => {
     if ((disabled || !isRecording) && recordingActiveRef.current && !stoppingRef.current) {
       stoppingRef.current = true;
       setIsStopping(true);
-      void cleanupRecordingResources(mountedRef.current).then(() => {
+      void cleanupRecordingResources(mountedRef.current, false).then(() => {
         if (mountedRef.current) {
           if (isRecording) {
             onRecordingChange(false);
@@ -378,7 +436,7 @@ export default function AudioRecorder({
   }, [disabled, isRecording, onRecordingChange, onRecordingStopped, cleanupRecordingResources]);
 
   const toggleRecording = async () => {
-    if (isStarting || isStopping || (disabled && !isRecording)) return;
+    if (isStarting || isStopping || disabled) return;
     if (isRecording) {
       await stopRecording();
     } else {
@@ -401,17 +459,17 @@ export default function AudioRecorder({
 
       <button
         onClick={toggleRecording}
-        disabled={isStarting || isStopping || (disabled && !isRecording)}
+        disabled={isStarting || isStopping || disabled}
         className={`
           relative z-10 w-16 h-16 rounded-full flex items-center justify-center
           transition-all duration-300 shadow-xl
-          ${isStarting || isStopping || (disabled && !isRecording) ? 'opacity-50 cursor-not-allowed shadow-none' : ''}
+          ${isStarting || isStopping || disabled ? 'opacity-50 cursor-not-allowed shadow-none' : ''}
           ${isRecording
             ? 'bg-primary-500 hover:bg-primary-600 shadow-primary-500/40'
             : 'bg-slate-700 hover:bg-slate-600 shadow-slate-900/50'
           }
         `}
-        title={isStarting ? '正在启动录音' : isStopping ? '正在停止录音' : disabled && !isRecording ? '语音识别准备中' : isRecording ? '停止录音' : '开始说话'}
+        title={isStarting ? '正在启动录音' : isStopping ? '正在停止录音' : disabled ? '面试官正在开场，请稍候' : isRecording ? '停止录音' : '开始说话'}
       >
         {isStarting || isStopping ? (
           <Loader2 className="w-7 h-7 text-white animate-spin" />

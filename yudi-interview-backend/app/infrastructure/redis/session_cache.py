@@ -23,6 +23,8 @@ class SessionCache:
       questions: list[InterviewQuestionDTO],
       current_index: int,
       status: str,
+      knowledge_base_id: int | None = None,
+      interview_category: str | None = None,
       is_fallback: bool = False,
       fallback_reason: str | None = None,
       generation_mode: str = "llm",
@@ -33,6 +35,8 @@ class SessionCache:
         "session_id": session_id,
         "resume_text": resume_text,
         "resume_id": str(resume_id) if resume_id else "",
+        "knowledge_base_id": str(knowledge_base_id) if knowledge_base_id else "",
+        "interview_category": interview_category or "",
         "questions": json.dumps([q.model_dump() for q in questions], ensure_ascii=False),
         "current_index": str(current_index),
         "status": status,
@@ -64,6 +68,8 @@ class SessionCache:
     resume_text = data.get("resume_text", "")
     resume_id_str = data.get("resume_id", "")
     resume_id = int(resume_id_str) if resume_id_str else None
+    knowledge_base_id_str = data.get("knowledge_base_id", "")
+    knowledge_base_id = int(knowledge_base_id_str) if knowledge_base_id_str else None
 
     return InterviewSessionDTO(
         session_id=session_id,
@@ -75,6 +81,8 @@ class SessionCache:
         is_fallback=data.get("is_fallback") == "1",
         fallback_reason=data.get("fallback_reason") or None,
         generation_mode=data.get("generation_mode") or "llm",
+        knowledge_base_id=knowledge_base_id,
+        interview_category=data.get("interview_category") or None,
     )
 
   async def update_status(self, session_id: str, status: str) -> None:

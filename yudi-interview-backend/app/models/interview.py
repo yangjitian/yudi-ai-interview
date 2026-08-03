@@ -1,14 +1,14 @@
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import ClassVar, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy import func as sql_func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config.database import Base
 from app.models.common import AsyncTaskStatus
-from app.utils.timezone_utils import get_beijing_now
+from app.utils.timezone_utils import get_beijing_now_naive
 
 
 class SessionStatus(str, Enum):
@@ -30,25 +30,39 @@ class InterviewSessionEntity(Base):
 
   id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
   session_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
-  skill_id: Mapped[str] = mapped_column(String(64), default="java-backend")
-  difficulty: Mapped[str] = mapped_column(String(16), default="mid")
+  skill_id: Mapped[Optional[str]] = mapped_column(
+      String(64), nullable=True, default="java-backend"
+  )
+  difficulty: Mapped[Optional[str]] = mapped_column(
+      String(16), nullable=True, default="mid"
+  )
+  source_type: Mapped[Optional[str]] = mapped_column(
+      String(32), nullable=True, default="NORMAL"
+  )
+  knowledge_base_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+  interview_category: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
   resume_id: Mapped[Optional[int]] = mapped_column(ForeignKey("resumes.id"), nullable=True)
   total_questions: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-  current_question_index: Mapped[int] = mapped_column(Integer, default=0)
-  status: Mapped[str] = mapped_column(String(20), default=SessionStatus.CREATED.value)
+  current_question_index: Mapped[Optional[int]] = mapped_column(
+      Integer, nullable=True, default=0
+  )
+  status: Mapped[Optional[str]] = mapped_column(
+      String(20), nullable=True, default=SessionStatus.CREATED.value
+  )
   questions_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-  question_generation_fallback_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+  # Q-02 决策前仅保留运行时语义，避免 ORM 读写 public.sql 中不存在的列。
+  question_generation_fallback_reason: ClassVar[Optional[str]] = None
   overall_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
   overall_feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
   strengths_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
   improvements_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
   reference_answers_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
   created_at: Mapped[datetime] = mapped_column(
-      DateTime(timezone=True), nullable=False, default=get_beijing_now
+      DateTime(timezone=False), nullable=False, default=get_beijing_now_naive
   )
-  completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+  completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
   evaluate_status: Mapped[Optional[str]] = mapped_column(
-      String(50), nullable=True
+      String(20), nullable=True
   )
   evaluate_error: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
   llm_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
@@ -70,24 +84,20 @@ class InterviewAnswerEntity(Base):
 
   id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
   session_id: Mapped[int] = mapped_column(
-      ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False
+      ForeignKey("interview_sessions.id"), nullable=False
   )
   question_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
   question: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-  category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+  category: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
   user_answer: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
   score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
   feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
   reference_answer: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
   key_points_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-  eval_status: Mapped[Optional[str]] = mapped_column(
-      String(20),
-      nullable=True,
-      default=None,
-      comment="??????: None=???, EVALUATING=???, COMPLETED=??, FAILED=??",
-  )
+  # Q-02 决策前仅用于单次评估流程，持久化完成态由已有 score 字段判断。
+  eval_status: ClassVar[Optional[str]] = None
   answered_at: Mapped[datetime] = mapped_column(
-      DateTime(timezone=True), nullable=False, default=get_beijing_now
+      DateTime(timezone=False), nullable=False, default=get_beijing_now_naive
   )
 
   session: Mapped["InterviewSessionEntity"] = relationship(

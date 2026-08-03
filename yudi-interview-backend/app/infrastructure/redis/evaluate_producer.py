@@ -270,7 +270,7 @@ class EvaluateStreamConsumer:
 
         question = questions[index]
         question.answer = answer.user_answer or ""
-        if answer.eval_status == "COMPLETED" and answer.score is not None:
+        if answer.score is not None:
           try:
             key_points = json.loads(answer.key_points_json) if answer.key_points_json else []
           except Exception:

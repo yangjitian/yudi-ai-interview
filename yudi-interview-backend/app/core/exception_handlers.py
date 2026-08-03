@@ -72,12 +72,16 @@ def register_exception_handlers(app: FastAPI) -> None:
         str(exc),
         exc_info=exc,
     )
-    return _error_response(ErrorCode.INTERNAL_ERROR.code, "系统繁忙，请稍后重试")
+    return _error_response(
+        ErrorCode.INTERNAL_ERROR.code,
+        "系统繁忙，请稍后重试",
+        status_code=500,
+    )
 
 
-def _error_response(code: int, message: str) -> JSONResponse:
+def _error_response(code: int, message: str, status_code: int = 200) -> JSONResponse:
   return JSONResponse(
-      status_code=200,
+      status_code=status_code,
       content=ApiResponse.error(code, message).model_dump(),
   )
 

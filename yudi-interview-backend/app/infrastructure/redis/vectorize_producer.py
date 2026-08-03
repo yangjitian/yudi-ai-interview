@@ -45,9 +45,9 @@ class VectorizeStreamConsumer:
         consumer_name or KB_VECTORIZE_CONSUMER_PREFIX + str(id(self))
     )
     self._running = False
+    self._consume_task: asyncio.Task[None] | None = None
 
   async def start(self) -> None:
-    self._running = True
     client = await get_redis()
     try:
       await client.xgroup_create(
@@ -58,11 +58,20 @@ class VectorizeStreamConsumer:
       )
     except Exception:
       pass
+    self._running = True
     log.info("VectorizeStreamConsumer started: %s", self.consumer_name)
-    asyncio.create_task(self._consume_loop())
+    self._consume_task = asyncio.create_task(self._consume_loop())
 
   async def stop(self) -> None:
     self._running = False
+    task = self._consume_task
+    self._consume_task = None
+    if task:
+      task.cancel()
+      try:
+        await task
+      except asyncio.CancelledError:
+        pass
 
   async def _consume_loop(self) -> None:
     import redis.asyncio as redis
@@ -86,10 +95,15 @@ class VectorizeStreamConsumer:
                 KB_VECTORIZE_GROUP_NAME,
                 msg_id,
             )
+      except asyncio.CancelledError:
+        raise
       except redis.ResponseError as e:
         if "NOSCRIPT" in str(e):
           await client.script_flush()
         log.error("Vectorize consume error: %s", e)
+        await asyncio.sleep(1)
+      except Exception as e:
+        log.error("向量化消费循环异常，将在 1 秒后重试: %s", e, exc_info=True)
         await asyncio.sleep(1)
 
   async def _process_message(self, client, msg_id: str, fields: dict) -> None:
@@ -113,7 +127,12 @@ class VectorizeStreamConsumer:
   async def _do_vectorize(self, kb_id: int, content: str) -> None:
     from app.models.knowledge_base import VectorStatus
 
+    if not content or not isinstance(content, str) or not content.strip():
+      raise ValueError(f"向量化内容无效: kbId={kb_id}")
+
     chunks = self._chunk_content(content)
+    if not chunks:
+      raise ValueError(f"文档分块结果为空: kbId={kb_id}")
     chunk_count = len(chunks)
 
     embeddings = await self._generate_embeddings(chunks)
@@ -146,54 +165,52 @@ class VectorizeStreamConsumer:
   ) -> None:
     from uuid import uuid4
     from app.config.database import _async_session_factory
-    from app.models.knowledge_base import (
-        KnowledgeDocumentEntity,
-        KnowledgeChunkEntity,
-        VectorStatus,
-    )
+    from app.models.knowledge_base import VectorStoreEntity
 
     async with _async_session_factory() as session:
-        doc = KnowledgeDocumentEntity(
-            doc_id=str(uuid4()),
-            kb_id=kb_id,
-            filename="vectorized_content",
-            file_key="",
-            file_size=0,
-            file_type="txt",
-            chunk_count=len(chunks),
-            status=VectorStatus.COMPLETED.value,
-        )
-        session.add(doc)
-        await session.flush()
-
-        for i, (chunk_content, embedding) in enumerate(zip(chunks, embeddings)):
-            chunk_entity = KnowledgeChunkEntity(
-                doc_id=doc.id,
-                kb_id=kb_id,
+        for chunk_content, embedding in zip(chunks, embeddings):
+            session.add(VectorStoreEntity(
+                id=str(uuid4()),
                 content=chunk_content,
-                chunk_index=i,
+                metadata_={"kb_id": str(kb_id)},
                 embedding=embedding,
-            )
-            session.add(chunk_entity)
+            ))
 
         await session.commit()
-        log.info("向量写入完成: kbId=%d docId=%s chunks=%d", kb_id, doc.doc_id, len(chunks))
+        log.info("向量写入完成: kbId=%d chunks=%d", kb_id, len(chunks))
 
-  def _chunk_content(self, content: str, chunk_size: int = 500) -> list[str]:
+  def _chunk_content(self, content: str, chunk_size: int = 800) -> list[str]:
+    """将文本按段落边界分块（对应 Java TokenTextSplitter，约 800 tokens/块）。"""
+    if not content or not content.strip():
+      return []
     paragraphs = content.split("\n\n")
     chunks = []
     current = []
     current_len = 0
     for para in paragraphs:
-      if current_len + len(para) > chunk_size and current:
+      stripped = para.strip()
+      if not stripped:
+        continue
+      # 单段落超过 chunk_size 时强制切分
+      if len(stripped) > chunk_size:
+        if current:
+          chunks.append("\n\n".join(current))
+          current = []
+          current_len = 0
+        for i in range(0, len(stripped), chunk_size):
+          sub = stripped[i:i + chunk_size].strip()
+          if sub:
+            chunks.append(sub)
+        continue
+      if current_len + len(stripped) > chunk_size and current:
         chunks.append("\n\n".join(current))
         current = []
         current_len = 0
-      current.append(para)
-      current_len += len(para)
+      current.append(stripped)
+      current_len += len(stripped)
     if current:
       chunks.append("\n\n".join(current))
-    return chunks
+    return [c for c in chunks if c.strip()]
 
   async def _requeue(self, kb_id: int, content: str, retry: int) -> None:
     client = await get_redis()

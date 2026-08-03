@@ -5,16 +5,8 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from sqlalchemy import select
-
 from app.infrastructure.ai.embedding_client import EmbeddingClient
 from app.infrastructure.ai.provider_registry import get_plain_chat_client
-from app.models.knowledge_base import (
-    KnowledgeBaseEntity,
-    KnowledgeChunkEntity,
-    KnowledgeDocumentEntity,
-    VectorStatus,
-)
 from app.repositories.kb_repository import KbRepository
 
 
@@ -404,37 +396,12 @@ class KnowledgeBaseQueryService:
     ) -> list[dict]:
         embedding_client = EmbeddingClient()
         query_vector = await embedding_client.embed_text(query_text)
-
-        distance = KnowledgeChunkEntity.embedding.cosine_distance(query_vector)
-
-        statement = (
-            select(
-                KnowledgeChunkEntity.content,
-                KnowledgeChunkEntity.chunk_index,
-                KnowledgeDocumentEntity.filename,
-                KnowledgeBaseEntity.name.label("kb_name"),
-                distance,
-            )
-            .join(
-                KnowledgeDocumentEntity,
-                KnowledgeChunkEntity.doc_id == KnowledgeDocumentEntity.id,
-            )
-            .join(
-                KnowledgeBaseEntity,
-                KnowledgeChunkEntity.kb_id == KnowledgeBaseEntity.id,
-            )
-            .where(
-                KnowledgeChunkEntity.embedding.is_not(None),
-                KnowledgeDocumentEntity.status == VectorStatus.COMPLETED.value,
-                KnowledgeBaseEntity.id.in_(kb_ids),
-                distance <= 1 - similarity_threshold,
-            )
-            .order_by(distance)
-            .limit(top_k)
+        chunks = await self.kb_repo.search_chunks_by_vector(
+            query_vector,
+            kb_ids,
+            top_k,
+            similarity_threshold,
         )
-
-        result = await self.kb_repo.session.execute(statement)
-        rows = result.all()
 
         log.debug(
             "向量检索完成: kb_ids=%s, query='%s', top_k=%d, threshold=%.2f, 返回 %d 条结果",
@@ -442,14 +409,6 @@ class KnowledgeBaseQueryService:
             query_text,
             top_k,
             similarity_threshold,
-            len(rows),
+            len(chunks),
         )
-
-        return [
-            {
-                "content": row[0],
-                "score": max(0.0, min(1.0, float(1 - row[4]))),
-                "source": row[3] or row[2],
-            }
-            for row in rows
-        ]
+        return chunks

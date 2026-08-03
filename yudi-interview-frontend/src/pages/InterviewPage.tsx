@@ -34,6 +34,9 @@ interface InterviewProps {
     customCategories?: CategoryDTO[];
     jdText?: string;
   };
+  title?: string;
+  subtitle?: string;
+  loadingText?: string;
   onBack: () => void;
   onInterviewComplete: () => void;
 }
@@ -43,6 +46,9 @@ export default function Interview({
   resumeId,
   sessionIdToResume,
   initialConfig,
+  title = '模拟面试',
+  subtitle = '认真回答每个问题，展示您的实力',
+  loadingText = '正在恢复面试...',
   onBack,
   onInterviewComplete,
 }: InterviewProps) {
@@ -225,7 +231,7 @@ export default function Interview({
         <div className="text-center">
           <div className="w-10 h-10 border-3 border-slate-200 border-t-primary-500 rounded-full mx-auto mb-4 animate-spin" />
           <p className="text-slate-500 dark:text-slate-400">
-            {sessionIdToResume ? '正在恢复面试...' : LOADING_MESSAGES[loadingMsgIdx]}
+            {sessionIdToResume ? loadingText : LOADING_MESSAGES[loadingMsgIdx]}
           </p>
         </div>
       </div>
@@ -262,8 +268,8 @@ export default function Interview({
   return (
     <div className="pb-10">
       <InterviewPageHeader
-        title="模拟面试"
-        subtitle="认真回答每个问题，展示您的实力"
+        title={title}
+        subtitle={subtitle}
         icon={(
           <svg className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="none">
             <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>

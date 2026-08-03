@@ -1,10 +1,11 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.config.database import Base
+from app.utils.timezone_utils import get_beijing_now_naive
 
 
 class LlmProviderEntity(Base):
@@ -22,10 +23,11 @@ class LlmProviderEntity(Base):
   enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
   builtin: Mapped[bool] = mapped_column(Boolean, nullable=False)
   created_at: Mapped[datetime] = mapped_column(
-      DateTime(), nullable=False, server_default=func.now()
+      DateTime(timezone=False), nullable=False, default=get_beijing_now_naive
   )
   updated_at: Mapped[datetime] = mapped_column(
-      DateTime(), nullable=False, server_default=func.now(), onupdate=func.now()
+      DateTime(timezone=False), nullable=False,
+      default=get_beijing_now_naive, onupdate=get_beijing_now_naive
   )
 
 
@@ -36,8 +38,9 @@ class LlmGlobalSettingEntity(Base):
   default_chat_provider_id: Mapped[str] = mapped_column(String(64), nullable=False)
   default_embedding_provider_id: Mapped[str] = mapped_column(String(64), nullable=False)
   created_at: Mapped[datetime] = mapped_column(
-      DateTime(), nullable=False, server_default=func.now()
+      DateTime(timezone=False), nullable=False, default=get_beijing_now_naive
   )
   updated_at: Mapped[datetime] = mapped_column(
-      DateTime(), nullable=False, server_default=func.now(), onupdate=func.now()
+      DateTime(timezone=False), nullable=False,
+      default=get_beijing_now_naive, onupdate=get_beijing_now_naive
   )

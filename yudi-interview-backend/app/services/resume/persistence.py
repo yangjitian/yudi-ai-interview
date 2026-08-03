@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.resume import ResumeAnalysisEntity, ResumeEntity
 from app.models.common import AsyncTaskStatus
-from app.utils.timezone_utils import get_beijing_now
+from app.utils.timezone_utils import get_beijing_now_naive
 
 log = logging.getLogger(__name__)
 
@@ -54,8 +54,8 @@ class ResumePersistenceService:
         storage_key=storage_key,
         storage_url=storage_url,
         resume_text=resume_text,
-        uploaded_at=get_beijing_now(),
-        last_accessed_at=get_beijing_now(),
+        uploaded_at=get_beijing_now_naive(),
+        last_accessed_at=get_beijing_now_naive(),
         access_count=1,
         analyze_status=AsyncTaskStatus.PENDING.value,
     )
@@ -123,7 +123,7 @@ class ResumePersistenceService:
         summary=summary,
         strengths_json=json.dumps(normalized_strengths, ensure_ascii=False),
         suggestions_json=json.dumps(suggestions, ensure_ascii=False),
-        analyzed_at=get_beijing_now(),
+        analyzed_at=get_beijing_now_naive(),
     )
     self.session.add(analysis)
     await self.session.flush()
@@ -178,4 +178,4 @@ class ResumePersistenceService:
     entity = await self.find_by_id(resume_id)
     if entity:
       entity.access_count = (entity.access_count or 0) + 1
-      entity.last_accessed_at = get_beijing_now()
+      entity.last_accessed_at = get_beijing_now_naive()

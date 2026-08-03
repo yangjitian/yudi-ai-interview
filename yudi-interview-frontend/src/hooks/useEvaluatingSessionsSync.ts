@@ -1,9 +1,11 @@
 import { useEffect, useRef } from 'react';
 import { subscribeEvaluationEvents } from '../api/interview';
+import { subscribeVoiceEvaluationEvents } from '../api/voiceInterview';
 
 interface SessionLike {
   sessionId: string;
   evaluateStatus?: string;
+  type?: 'text' | 'voice';
   [key: string]: unknown;
 }
 
@@ -55,7 +57,25 @@ export function useEvaluatingSessionsSync<T extends SessionLike>(
       .slice(0, remainingSlots);
 
     toSubscribe.forEach((session) => {
-      const cleanup = subscribeEvaluationEvents(
+      let cleanup = () => {};
+      if (session.type === 'voice') {
+        cleanup = subscribeVoiceEvaluationEvents(
+          session.sessionId,
+          (response) => {
+            const status = response.evaluateStatus;
+            if (!status) return;
+            onStatusChangeRef.current(
+              session.sessionId,
+              status,
+              response.evaluation?.overallScore,
+            );
+            if (status === 'COMPLETED' || status === 'COMPLETED_WITH_ERRORS' || status === 'FAILED') {
+              cleanupMapRef.current.delete(session.sessionId);
+            }
+          },
+        );
+      } else {
+        cleanup = subscribeEvaluationEvents(
         session.sessionId,
         (status) => {
           onStatusChangeRef.current(session.sessionId, status);
@@ -70,7 +90,8 @@ export function useEvaluatingSessionsSync<T extends SessionLike>(
           cleanupMapRef.current.delete(session.sessionId);
           cleanup();
         },
-      );
+        );
+      }
       cleanupMapRef.current.set(session.sessionId, cleanup);
     });
 

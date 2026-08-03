@@ -13,6 +13,12 @@ import {
   VoiceInterviewWebSocket,
 } from '../api/voiceInterview';
 
+function logVoiceTimeline(event: string, details: Record<string, unknown> = {}) {
+  console.info(
+    `[VOICE_TIMELINE] ts=${new Date().toISOString()} perf=${performance.now().toFixed(1)}ms event=${event} details=${JSON.stringify(details)}`,
+  );
+}
+
 type VoiceConfig = {
   skillId: string;
   difficulty?: string;
@@ -65,6 +71,7 @@ export default function VoiceInterviewPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isConfirmingAnswer, setIsConfirmingAnswer] = useState(false);
   const [isAsrReady, setIsAsrReady] = useState(false);
+  const [isOpeningPending, setIsOpeningPending] = useState(true);
 
   const [skills, setSkills] = useState<SkillDTO[]>([]);
 
@@ -78,11 +85,15 @@ export default function VoiceInterviewPage() {
   const isAiSpeakingRef = useRef(false);
   const isAsrReadyRef = useRef(false);
   const isSubmittingRef = useRef(false);
+  const isOpeningPendingRef = useRef(true);
+  const openingAudioReceivedRef = useRef(false);
+  const audioGateBlockedRef = useRef<boolean | null>(null);
   const pendingSubmitTextRef = useRef<string | null>(null);
   const aiAudioPendingRef = useRef(false);
   const lastAiCommittedTextRef = useRef('');
   const pendingAiTextCommitRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioPlaybackWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioPlaybackRetryRef = useRef<(() => void) | null>(null);
   // Chunked audio playback refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const chunkQueueRef = useRef<AudioBuffer[]>([]);
@@ -100,6 +111,12 @@ export default function VoiceInterviewPage() {
     setIsAiSpeaking(value);
   }, []);
 
+  const setOpeningPending = useCallback((value: boolean, reason: string) => {
+    isOpeningPendingRef.current = value;
+    setIsOpeningPending(value);
+    logVoiceTimeline('opening_lock_changed', { locked: value, reason });
+  }, []);
+
   const clearPendingAiTextCommit = useCallback(() => {
     if (pendingAiTextCommitRef.current) {
       clearTimeout(pendingAiTextCommitRef.current);
@@ -111,6 +128,13 @@ export default function VoiceInterviewPage() {
     if (audioPlaybackWatchdogRef.current) {
       clearTimeout(audioPlaybackWatchdogRef.current);
       audioPlaybackWatchdogRef.current = null;
+    }
+  }, []);
+
+  const clearAudioPlaybackRetry = useCallback(() => {
+    if (audioPlaybackRetryRef.current) {
+      document.removeEventListener('pointerdown', audioPlaybackRetryRef.current);
+      audioPlaybackRetryRef.current = null;
     }
   }, []);
 
@@ -158,13 +182,14 @@ export default function VoiceInterviewPage() {
   const finishAiPlayback = useCallback(() => {
     aiAudioPendingRef.current = false;
     clearAudioPlaybackWatchdog();
+    clearAudioPlaybackRetry();
     setAiSpeaking(false);
     setIsSubmitting(false);
     clearPendingAiTextCommit();
     commitAiMessage(aiTextRef.current.trim());
     setAiText('');
     setAiAudio('');
-  }, [clearAudioPlaybackWatchdog, clearPendingAiTextCommit, commitAiMessage, setAiSpeaking]);
+  }, [clearAudioPlaybackRetry, clearAudioPlaybackWatchdog, clearPendingAiTextCommit, commitAiMessage, setAiSpeaking]);
 
   // --- Chunked audio playback via AudioContext ---
   const getAudioContext = useCallback(() => {
@@ -277,6 +302,7 @@ export default function VoiceInterviewPage() {
         wsRef.current.disconnect();
       }
       clearAudioPlaybackWatchdog();
+      clearAudioPlaybackRetry();
       chunkPlaybackSourceRef.current?.stop();
       audioContextRef.current?.close();
       if (drainCheckRef.current) {
@@ -290,7 +316,7 @@ export default function VoiceInterviewPage() {
         voiceInterviewApi.pauseSession(currentSessionId).catch(() => {});
       }
     };
-  }, [clearAudioPlaybackWatchdog, clearPendingAiTextCommit, sessionId]);
+  }, [clearAudioPlaybackRetry, clearAudioPlaybackWatchdog, clearPendingAiTextCommit, sessionId]);
 
   // Start interview timer
   useEffect(() => {
@@ -310,15 +336,62 @@ export default function VoiceInterviewPage() {
   // Auto-play audio when aiAudio changes
   useEffect(() => {
     if (aiAudio && audioPlayerRef.current) {
+      clearAudioPlaybackRetry();
       const playPromise = audioPlayerRef.current.play();
       if (playPromise !== undefined) {
         playPromise.catch(() => {
           setError('请点击页面任意位置以启用音频播放');
-          finishAiPlayback();
+          logVoiceTimeline('audio_play_blocked', {
+            openingPending: isOpeningPendingRef.current,
+          });
+          if (!isOpeningPendingRef.current) {
+            finishAiPlayback();
+            return;
+          }
+          const retryPlayback = () => {
+            audioPlaybackRetryRef.current = null;
+            const audio = audioPlayerRef.current;
+            if (!audio) {
+              return;
+            }
+            void audio.play().then(() => {
+              setError(null);
+              logVoiceTimeline('audio_play_retry_started');
+            }).catch(() => {
+              setError('浏览器仍未允许播放开场白，请再次点击页面');
+              logVoiceTimeline('audio_play_retry_blocked');
+              audioPlaybackRetryRef.current = retryPlayback;
+              document.addEventListener('pointerdown', retryPlayback, { once: true });
+            });
+          };
+          audioPlaybackRetryRef.current = retryPlayback;
+          document.addEventListener('pointerdown', retryPlayback, { once: true });
         });
       }
     }
-  }, [aiAudio, finishAiPlayback]);
+  }, [aiAudio, clearAudioPlaybackRetry, finishAiPlayback]);
+
+  useEffect(() => {
+    const locked = connectionStatus !== 'connected'
+      || !isAsrReady
+      || isOpeningPending
+      || isAiSpeaking
+      || isSubmitting
+      || isConfirmingAnswer;
+    logVoiceTimeline('microphone_ui_state', {
+      locked,
+      connectionStatus,
+      isAsrReady,
+      isOpeningPending,
+      isAiSpeaking,
+      isSubmitting,
+      isConfirmingAnswer,
+      isRecording,
+    });
+    if (locked && isRecording) {
+      setIsRecording(false);
+    }
+  }, [connectionStatus, isAiSpeaking, isAsrReady, isConfirmingAnswer, isOpeningPending, isRecording, isSubmitting]);
 
   const startTimer = () => {
     timerRef.current = setInterval(() => {
@@ -379,6 +452,10 @@ export default function VoiceInterviewPage() {
   const createWebSocketHandlers = useCallback(() => ({
     onOpen: () => {
       setConnectionStatus('connected');
+      setIsAsrReady(false);
+      openingAudioReceivedRef.current = false;
+      setOpeningPending(true, 'websocket_open');
+      logVoiceTimeline('websocket_open');
     },
     onMessage: () => {},
     onSubtitle: (text: string, isFinal: boolean) => {
@@ -403,6 +480,10 @@ export default function VoiceInterviewPage() {
       const hasAudio = !!(audioData && audioData.length > 0);
       const normalized = (text || '').trim();
       if (hasAudio) {
+        if (isOpeningPendingRef.current) {
+          openingAudioReceivedRef.current = true;
+          logVoiceTimeline('opening_audio_received', { bytes: audioData.length });
+        }
         clearPendingAiTextCommit();
         clearAudioPlaybackWatchdog();
         aiAudioPendingRef.current = false;
@@ -411,7 +492,13 @@ export default function VoiceInterviewPage() {
         setAiSpeaking(true);
         const durationMs = estimateWavDurationMs(audioData);
         audioPlaybackWatchdogRef.current = setTimeout(
-          finishAiPlayback,
+          () => {
+            if (isOpeningPendingRef.current) {
+              logVoiceTimeline('opening_watchdog_waiting_for_audio_ended');
+              return;
+            }
+            finishAiPlayback();
+          },
           Math.min(Math.max(durationMs + 1500, 4000), 60_000)
         );
         return;
@@ -479,6 +566,24 @@ export default function VoiceInterviewPage() {
       if (action === 'asr_ready') {
         setIsAsrReady(true);
         setError(null);
+        logVoiceTimeline('asr_ready_received', {
+          openingPending: isOpeningPendingRef.current,
+        });
+        return;
+      }
+      if (action === 'opening_started') {
+        openingAudioReceivedRef.current = false;
+        setOpeningPending(true, 'opening_started');
+        logVoiceTimeline('opening_started_received');
+        return;
+      }
+      if (action === 'opening_complete') {
+        logVoiceTimeline('opening_complete_received', {
+          hasAudio: openingAudioReceivedRef.current,
+        });
+        if (!openingAudioReceivedRef.current) {
+          setOpeningPending(false, 'opening_complete_no_audio');
+        }
         return;
       }
       if (action === 'asr_reconnecting') {
@@ -530,10 +635,13 @@ export default function VoiceInterviewPage() {
     handleAudioChunk,
     scheduleChunkDrainCompletion,
     setAiSpeaking,
+    setOpeningPending,
   ]);
 
   const connectWithHandlers = useCallback((sessionId: string, wsUrl: string) => {
     setIsAsrReady(false);
+    openingAudioReceivedRef.current = false;
+    setOpeningPending(true, 'websocket_connecting');
     setTimeout(() => {
       try {
         wsRef.current = connectWebSocket(sessionId, wsUrl, createWebSocketHandlers());
@@ -543,7 +651,7 @@ export default function VoiceInterviewPage() {
         setIsAsrReady(false);
       }
     }, 500);
-  }, [createWebSocketHandlers]);
+  }, [createWebSocketHandlers, setOpeningPending]);
 
   const handlePhaseConfig = useCallback(async (config: {
     skillId: string;
@@ -558,6 +666,8 @@ export default function VoiceInterviewPage() {
     setError(null);
     setConnectionStatus('connecting');
     setIsAsrReady(false);
+    openingAudioReceivedRef.current = false;
+    setOpeningPending(true, 'new_session_start');
 
     try {
       const session = await voiceInterviewApi.createSession({
@@ -584,12 +694,14 @@ export default function VoiceInterviewPage() {
       setIsAsrReady(false);
       alert('创建会话失败：' + errorMessage);
     }
-  }, [connectWithHandlers]);
+  }, [connectWithHandlers, setOpeningPending]);
 
   const handleResumeSession = useCallback(async (id: string) => {
     setError(null);
     setConnectionStatus('connecting');
     setIsAsrReady(false);
+    openingAudioReceivedRef.current = false;
+    setOpeningPending(true, 'resume_session_start');
 
     try {
       const [session, history] = await Promise.all([
@@ -643,7 +755,7 @@ export default function VoiceInterviewPage() {
       setConnectionStatus('disconnected');
       setIsAsrReady(false);
     }
-  }, [connectWithHandlers]);
+  }, [connectWithHandlers, setOpeningPending]);
 
   // Auto-start: 新建 or 恢复
   useEffect(() => {
@@ -669,10 +781,21 @@ export default function VoiceInterviewPage() {
 
   // 麦克风音频持续发送给服务端做 ASR；仅 AI 播放时停发，避免回声进入识别
   const handleAudioData = (audioData: string) => {
-    if (isAiSpeakingRef.current || isSubmittingRef.current) {
-      return;
+    const blocked = isOpeningPendingRef.current
+      || isAiSpeakingRef.current
+      || isSubmittingRef.current
+      || !isAsrReadyRef.current;
+    if (audioGateBlockedRef.current !== blocked) {
+      audioGateBlockedRef.current = blocked;
+      logVoiceTimeline('asr_audio_gate', {
+        blocked,
+        isOpeningPending: isOpeningPendingRef.current,
+        isAiSpeaking: isAiSpeakingRef.current,
+        isSubmitting: isSubmittingRef.current,
+        isAsrReady: isAsrReadyRef.current,
+      });
     }
-    if (!isAsrReadyRef.current) {
+    if (blocked) {
       return;
     }
     if (wsRef.current && wsRef.current.isConnected()) {
@@ -742,10 +865,13 @@ export default function VoiceInterviewPage() {
   };
 
   // 提交按钮是否可用
-  const canSubmit = !!userText.trim() && !isAiSpeaking && !isSubmitting && !isConfirmingAnswer && connectionStatus === 'connected';
-  const canRecord = connectionStatus === 'connected' && isAsrReady && !isAiSpeaking && !isSubmitting && !isConfirmingAnswer;
+  const inputLocked = connectionStatus !== 'connected' || !isAsrReady || isOpeningPending || isAiSpeaking || isSubmitting || isConfirmingAnswer;
+  const canSubmit = !!userText.trim() && !inputLocked;
+  const canRecord = !inputLocked;
   const recorderHint = connectionStatus !== 'connected'
     ? '正在连接服务器...'
+    : isOpeningPending
+      ? isAiSpeaking ? '面试官正在开场，请稍候...' : '面试官正在准备开场，请稍候...'
     : !isAsrReady
       ? '语音识别准备中...'
       : isAiSpeaking
@@ -759,6 +885,8 @@ export default function VoiceInterviewPage() {
             : '点击麦克风开始发言';
   const footerHint = isAiSpeaking
     ? '面试官正在回答...'
+    : isOpeningPending
+      ? '面试官正在开场，请稍候...'
     : isConfirmingAnswer
       ? '正在确认识别结果...'
       : isSubmitting
@@ -904,7 +1032,8 @@ export default function VoiceInterviewPage() {
 
                 <AudioRecorder
                   isRecording={isRecording}
-                  disabled={!isRecording && !canRecord}
+                  disabled={!canRecord}
+                  prewarm={canRecord}
                   onRecordingChange={setIsRecording}
                   onRecordingStopped={sendPendingAnswer}
                   onAudioData={handleAudioData}
@@ -963,9 +1092,22 @@ export default function VoiceInterviewPage() {
           ref={audioPlayerRef}
           src={`data:audio/wav;base64,${aiAudio}`}
           onEnded={() => {
+            const openingWasPending = isOpeningPendingRef.current;
+            logVoiceTimeline('audio_playback_finished', {
+              openingPending: openingWasPending,
+            });
             finishAiPlayback();
+            if (openingWasPending) {
+              openingAudioReceivedRef.current = false;
+              setOpeningPending(false, 'opening_audio_ended');
+            }
           }}
-          onPlay={() => setAiSpeaking(true)}
+          onPlay={() => {
+            logVoiceTimeline('audio_play_started', {
+              openingPending: isOpeningPendingRef.current,
+            });
+            setAiSpeaking(true);
+          }}
           autoPlay
           style={{ display: 'none' }}
         />

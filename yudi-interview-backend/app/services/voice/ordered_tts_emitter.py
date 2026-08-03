@@ -57,10 +57,10 @@ class OrderedTtsEmitter:
         self._tts_service = tts_service
         self._session_id = session_id
         self._send_fn_async = send_fn_async
-        self._max_concurrent = max_concurrent
+        self._max_concurrent = max(1, max_concurrent)
         self._timeout = timeout
 
-        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._semaphore = asyncio.Semaphore(self._max_concurrent)
         self._next_index = 0
         self._total_submitted = 0
 
@@ -76,15 +76,18 @@ class OrderedTtsEmitter:
 
     def submit(self, text: str) -> asyncio.Task:
         """提交一个 TTS 任务（立即启动，不阻塞）。"""
-        task = asyncio.create_task(self._run_tts(text))
-        self._tasks[self._next_index] = task
-        log.info("[OrderedTtsEmitter] Submitted task index=%d, text=%s",
-                 self._next_index, text[:30])
+        index = self._next_index
         self._next_index += 1
         self._total_submitted += 1
+        task = asyncio.create_task(self._run_tts(index, text))
+        self._tasks[index] = task
+        log.info("[OrderedTtsEmitter] Submitted task index=%d, text=%s",
+                 index, text[:30])
+        if index > 0:
+            asyncio.create_task(self._try_send())
         return task
 
-    async def _run_tts(self, text: str) -> None:
+    async def _run_tts(self, index: int, text: str) -> None:
         """
         执行单个 TTS 任务。
 
@@ -92,8 +95,6 @@ class OrderedTtsEmitter:
         正确跨线程设置），不再创建独立的 asyncio.Event，避免双重等待导致的超时。
         """
         async with self._semaphore:
-            index = self._next_index - 1  # 对应 submit 时的 index
-
             chunks: list[bytes] = []
             err: list[Exception] = []
 
@@ -132,21 +133,28 @@ class OrderedTtsEmitter:
         """尝试发送已完成的 TTS 结果（按序，带发送间隔控制）。"""
         async with self._lock:
             while self._sent_index in self._results:
+                # LLM 尚未结束时保留当前最后一句，等下一句到达或 drain() 后再确定 isLast。
+                if not self._finished and self._sent_index == self._total_submitted - 1:
+                    break
                 result = self._results.pop(self._sent_index)
                 if result.error:
                     log.warning("[OrderedTtsEmitter] TTS error for index=%d: %s",
                                result.index, result.error)
                 elif result.chunks:
-                    chunk_count = len(result.chunks)
-                    log.info("[OrderedTtsEmitter] Sending index=%d, chunks=%d",
-                             result.index, chunk_count)
-                    # P2-2: 逐个发送分片，控制发送间隔防止爆发
-                    for i, chunk in enumerate(result.chunks):
-                        chunk_index = self._sent_index * 100 + i
-                        is_last = False
-                        # 发送间隔控制
-                        await self._throttle_send()
-                        await self._send_fn_async(chunk, chunk_index, is_last)
+                    is_last = (
+                        self._finished
+                        and self._sent_index == self._total_submitted - 1
+                    )
+                    log.info(
+                        "[OrderedTtsEmitter] Sending index=%d, source_chunks=%d, is_last=%s",
+                        result.index,
+                        len(result.chunks),
+                        is_last,
+                    )
+                    await self._throttle_send()
+                    await self._send_fn_async(
+                        b"".join(result.chunks), self._sent_index, is_last
+                    )
                 self._sent_index += 1
 
     async def _throttle_send(self) -> None:
@@ -159,18 +167,31 @@ class OrderedTtsEmitter:
 
     async def drain(self) -> int:
         """等待所有 TTS 任务完成并发送。"""
+        self._finished = True
+
         # 等待所有任务完成
         pending = [t for t in self._tasks.values() if not t.done()]
         if pending:
+            concurrent_batches = (
+                len(pending) + self._max_concurrent - 1
+            ) // self._max_concurrent
+            drain_timeout = self._timeout * concurrent_batches + 2
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*pending, return_exceptions=True),
-                    timeout=self._timeout * max(1, self._total_submitted),
+                    timeout=drain_timeout,
                 )
             except asyncio.TimeoutError:
-                log.warning("[OrderedTtsEmitter] Drain timeout")
-
-        self._finished = True
+                log.warning(
+                    "[OrderedTtsEmitter] Drain timeout after %.1fs, pending=%d, batches=%d",
+                    drain_timeout,
+                    len(pending),
+                    concurrent_batches,
+                )
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
 
         # 发送剩余结果
         await self._try_send()

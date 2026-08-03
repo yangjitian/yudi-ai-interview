@@ -48,13 +48,16 @@ class EvaluationSummary(BaseModel):
 
 class UnifiedEvaluationService:
   EVAL_BATCH_TIMEOUT: int = int(os.getenv("EVAL_BATCH_TIMEOUT", "200"))
-  EVAL_BATCH_SIZE: int = 8
+  EVAL_BATCH_SIZE: int = 6
   EVAL_SINGLE_TIMEOUT: int = int(os.getenv("EVAL_SINGLE_TIMEOUT", "95"))
   SUMMARY_TIMEOUT: int = 95
 
   def __init__(self) -> None:
     interview_settings = get_settings().interview
-    self.EVAL_BATCH_SIZE = interview_settings.app_interview_evaluation_batch_size
+    self.EVAL_BATCH_SIZE = min(
+        max(1, interview_settings.app_interview_evaluation_batch_size),
+        self.EVAL_BATCH_SIZE,
+    )
     self.EVAL_STRATEGY = interview_settings.evaluation_strategy.lower()
     if self.EVAL_STRATEGY not in {"single", "batch"}:
       log.warning("[EVAL_CONFIG] 未知评估策略 %s，回退为 single", self.EVAL_STRATEGY)
@@ -64,7 +67,7 @@ class UnifiedEvaluationService:
     self.EVAL_QUESTION_CONCURRENCY = max(1, interview_settings.evaluation_question_concurrency)
     self.EVAL_QUESTION_REFERENCE_MAX_CHARS = max(200, interview_settings.evaluation_question_reference_max_chars)
     configured_batch_timeout = int(os.getenv("EVAL_BATCH_TIMEOUT", "200"))
-    self.EVAL_SINGLE_TIMEOUT = int(os.getenv("EVAL_SINGLE_TIMEOUT", "95"))
+    self.EVAL_SINGLE_TIMEOUT = max(1, interview_settings.evaluation_single_timeout)
     self.SUMMARY_TIMEOUT = interview_settings.evaluation_summary_timeout_seconds
     self.EVAL_RETRY_COUNT = max(1, interview_settings.evaluation_batch_retry_count)
     self.EVAL_RETRY_BACKOFF_SECONDS = float(os.getenv("EVAL_RETRY_BACKOFF_SECONDS", "2"))

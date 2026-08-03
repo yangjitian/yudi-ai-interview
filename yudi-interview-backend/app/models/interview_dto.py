@@ -19,7 +19,18 @@ class CreateInterviewRequest(BaseModel):
 class InterviewQuestionDTO(BaseModel):
   question: str
   category: str
+  question_index: Optional[int] = None
+  type: Optional[str] = None
+  topic_summary: Optional[str] = None
   answer: Optional[str] = None
+  score: Optional[int] = None
+  feedback: Optional[str] = None
+  is_follow_up: bool = False
+  parent_question_index: Optional[int] = None
+  reference_answer: Optional[str] = None
+  key_points: list[str] = Field(default_factory=list)
+  scoring_rubric: Optional[str] = None
+  source_context: Optional[str] = None
 
 
 class InterviewSessionDTO(BaseModel):
@@ -32,6 +43,8 @@ class InterviewSessionDTO(BaseModel):
   is_fallback: bool = False
   fallback_reason: Optional[str] = None
   generation_mode: str = "llm"
+  knowledge_base_id: Optional[int] = None
+  interview_category: Optional[str] = None
 
 
 class SubmitAnswerRequest(BaseModel):

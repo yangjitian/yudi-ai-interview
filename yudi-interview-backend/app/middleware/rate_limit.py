@@ -1,6 +1,7 @@
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from uuid import uuid4
 
 from app.config.settings import get_settings
 from app.core.errors import ErrorCode
@@ -82,12 +83,14 @@ async def check_rate_limit(
         sha,
         1,
         redis_key,
+        str(int(current_time)),
+        "1",
         str(config.interval_ms),
         str(config.count),
-        str(int(current_time)),
+        str(uuid4()),
     )
-    remaining = int(result)
-    return remaining >= 0, remaining
+    result_code = int(result)
+    return result_code == 1, result_code
   except Exception:
     return True, config.count
 

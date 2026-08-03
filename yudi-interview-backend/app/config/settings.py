@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 from functools import lru_cache
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,12 +37,14 @@ def _parse_cors_origins(v):
 
 
 class DatabaseSettings(BaseModel):
+  model_config = ConfigDict(populate_by_name=True)
+
   url: str | None = Field(default=None, alias="DB_URL")
   host: str = Field(default="localhost", alias="DB_HOST")
   port: int = Field(default=5432, alias="DB_PORT")
   username: str = Field(default="postgres", alias="DB_USERNAME")
   password: str = Field(default="password", alias="DB_PASSWORD")
-  name: str = Field(default="interview_guide", alias="DB_NAME")
+  name: str = Field(default="yudi_interview", alias="DB_NAME")
 
   @property
   def connection_url(self) -> str:
@@ -196,6 +198,53 @@ class AISettings(BaseSettings):
     }
 
 
+class VoicePhaseDurationConfig(BaseModel):
+  min_duration: int
+  suggested_duration: int
+  max_duration: int
+  min_questions: int
+  max_questions: int
+
+
+class VoicePhaseConfig(BaseModel):
+  intro: VoicePhaseDurationConfig = Field(
+      default_factory=lambda: VoicePhaseDurationConfig(
+          min_duration=3,
+          suggested_duration=5,
+          max_duration=8,
+          min_questions=2,
+          max_questions=5,
+      )
+  )
+  tech: VoicePhaseDurationConfig = Field(
+      default_factory=lambda: VoicePhaseDurationConfig(
+          min_duration=8,
+          suggested_duration=10,
+          max_duration=15,
+          min_questions=3,
+          max_questions=8,
+      )
+  )
+  project: VoicePhaseDurationConfig = Field(
+      default_factory=lambda: VoicePhaseDurationConfig(
+          min_duration=8,
+          suggested_duration=10,
+          max_duration=15,
+          min_questions=2,
+          max_questions=5,
+      )
+  )
+  hr: VoicePhaseDurationConfig = Field(
+      default_factory=lambda: VoicePhaseDurationConfig(
+          min_duration=3,
+          suggested_duration=5,
+          max_duration=8,
+          min_questions=2,
+          max_questions=5,
+      )
+  )
+
+
 class VoiceInterviewSettings(BaseSettings):
   model_config = SettingsConfigDict(
       env_file=ENV_FILE,
@@ -212,6 +261,9 @@ class VoiceInterviewSettings(BaseSettings):
   app_voice_asr_turn_detection_threshold: float = Field(default=0.0, alias="APP_VOICE_ASR_TURN_DETECTION_THRESHOLD")
   app_voice_asr_silence_ms: int = Field(default=2000, alias="APP_VOICE_ASR_SILENCE_MS")
   app_voice_asr_chunk_ms: int = Field(default=200, alias="APP_VOICE_ASR_CHUNK_MS")
+  app_voice_asr_filter_filler_words: bool = Field(
+      default=True, alias="APP_VOICE_ASR_FILTER_FILLER_WORDS"
+  )
   app_voice_tts_model: str = Field(default="qwen3-tts-flash-realtime", alias="APP_VOICE_TTS_MODEL")
   app_voice_tts_api_key: str = Field(default="", alias="APP_VOICE_TTS_API_KEY")
   app_voice_tts_voice: str = Field(default="Cherry", alias="APP_VOICE_TTS_VOICE")
@@ -229,7 +281,14 @@ class VoiceInterviewSettings(BaseSettings):
   app_voice_chunked_audio_enabled: bool = Field(default=True, alias="APP_VOICE_CHUNKED_AUDIO_ENABLED")
   app_voice_tts_timeout_seconds: int = Field(default=8, alias="APP_VOICE_TTS_TIMEOUT_SECONDS")
   app_voice_max_concurrent_tts_per_session: int = Field(default=3, alias="APP_VOICE_MAX_CONCURRENT_TTS_PER_SESSION")
+  app_voice_opening_audio_warmup_enabled: bool = Field(
+      default=False, alias="APP_VOICE_OPENING_AUDIO_WARMUP_ENABLED"
+  )
+  app_voice_tts_pool_idle_timeout_seconds: int = Field(
+      default=300, alias="APP_VOICE_TTS_POOL_IDLE_TIMEOUT_SECONDS"
+  )
   max_concurrent_tts_per_session: int = Field(default=3)
+  phase: VoicePhaseConfig = Field(default_factory=VoicePhaseConfig)
 
   # asr_service.py 使用的短名别名（与 app_voice_asr_* 共存）
   # asr_service.py 中使用 self._cfg.asr_* 访问，这里用别名指向 app_voice_asr_* 字段
@@ -243,6 +302,7 @@ class VoiceInterviewSettings(BaseSettings):
   asr_turn_detection_threshold: float = Field(default=0.0)
   asr_turn_detection_silence_duration_ms: int = Field(default=2000)
   asr_audio_chunk_ms: int = Field(default=200)
+  asr_filter_filler_words: bool = Field(default=True)
   asr_api_key: str = Field(default="")
 
   # use_direct_llm_client 配置（ws_handler.py _init_llm_client 使用）
@@ -279,6 +339,7 @@ class VoiceInterviewSettings(BaseSettings):
         self.asr_turn_detection_threshold = self.app_voice_asr_turn_detection_threshold
         self.asr_turn_detection_silence_duration_ms = self.app_voice_asr_silence_ms
         self.asr_audio_chunk_ms = self.app_voice_asr_chunk_ms
+        self.asr_filter_filler_words = self.app_voice_asr_filter_filler_words
         # 同步 tts_* 短名
         self.tts_model = self.tts_model or self.app_voice_tts_model
         self.tts_voice = self.tts_voice or self.app_voice_tts_voice
@@ -313,6 +374,7 @@ class InterviewSettings(BaseSettings):
   app_interview_evaluation_batch_size: int = Field(default=8, alias="APP_INTERVIEW_EVALUATION_BATCH_SIZE")
   question_generation_timeout_seconds: int = Field(default=90, alias="APP_INTERVIEW_QUESTION_GENERATION_TIMEOUT_SECONDS")
   evaluation_batch_retry_count: int = Field(default=2, alias="APP_INTERVIEW_EVALUATION_BATCH_RETRY_COUNT")
+  evaluation_single_timeout: int = Field(default=95, alias="EVAL_SINGLE_TIMEOUT")
   evaluation_summary_timeout_seconds: int = Field(default=95, alias="APP_INTERVIEW_EVALUATION_SUMMARY_TIMEOUT_SECONDS")
   evaluation_strategy: str = Field(default="batch", alias="APP_INTERVIEW_EVALUATION_STRATEGY")
   evaluation_question_timeout_seconds: int = Field(default=60, alias="APP_INTERVIEW_EVALUATION_QUESTION_TIMEOUT_SECONDS")
@@ -352,7 +414,7 @@ class Settings(BaseSettings):
   db_port: int = Field(default=5432, alias="DB_PORT")
   db_username: str = Field(default="postgres", alias="DB_USERNAME")
   db_password: str = Field(default="password", alias="DB_PASSWORD")
-  db_name: str = Field(default="interview_guide", alias="DB_NAME")
+  db_name: str = Field(default="yudi_interview", alias="DB_NAME")
   redis_url: str | None = Field(default=None, alias="REDIS_URL")
   redis_host: str = Field(default="localhost", alias="REDIS_HOST")
   redis_port: int = Field(default=6379, alias="REDIS_PORT")

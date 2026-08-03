@@ -86,8 +86,5 @@ def get_backend_opening() -> str:
 
 
 def get_phase_opening(skill_id: str, phase: str) -> str:
-  if phase.upper() == "INTRO":
-    return get_opening_question(skill_id)
-  if phase.upper() == "TECH" and is_algorithm_skill(skill_id):
-    return get_algorithm_opening()
-  return get_backend_opening()
+  """首次连接始终按技能选择开场白，与 Java buildOpeningQuestion 保持一致。"""
+  return get_opening_question(skill_id)

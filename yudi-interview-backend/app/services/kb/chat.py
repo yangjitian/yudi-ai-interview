@@ -7,7 +7,7 @@ from app.core.errors import BusinessException, ErrorCode
 from app.models.knowledge_base import KnowledgeBaseEntity, RagChatMessageEntity, RagChatSessionEntity
 from app.repositories.kb_repository import RagChatRepository
 from app.services.kb.query import KnowledgeBaseQueryService
-from app.utils.timezone_utils import get_beijing_now
+from app.utils.timezone_utils import get_beijing_now_naive
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ class RagChatService:
         completed=False,
     ))
     session.message_count = next_order + 2
-    session.updated_at = get_beijing_now()
+    session.updated_at = get_beijing_now_naive()
     await self.rag_repo.session.flush()
     return assistant.id
 

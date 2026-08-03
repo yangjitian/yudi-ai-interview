@@ -26,32 +26,35 @@ interface BackendSessionMeta {
 }
 
 interface BackendEvaluationStatus {
-  session_id: number;
-  status?: string | null;
-  evaluate_status: string | null;
-  evaluate_error?: string | null;
-  overall_score: number | null;
-  overall_feedback?: string | null;
-  strengths?: string[] | null;
-  improvements?: string[] | null;
-  reference_answers?: string[] | null;
-  question_evaluations?: BackendQuestionEvaluation[] | null;
+  evaluateStatus: string | null;
+  evaluateError?: string | null;
+  evaluateStatusUpdatedAt?: string | null;
+  evaluation?: BackendEvaluationDetail | null;
 }
 
 interface BackendQuestionEvaluation {
-  question_index?: number | null;
+  questionIndex?: number | null;
   question?: string | null;
   category?: string | null;
-  user_answer?: string | null;
+  userAnswer?: string | null;
   score?: number | null;
   feedback?: string | null;
-  reference_answer?: string | null;
-  key_points?: string[] | null;
+  referenceAnswer?: string | null;
+  keyPoints?: string[] | null;
+}
+
+interface BackendEvaluationDetail {
+  sessionId: number;
+  totalQuestions: number;
+  overallScore?: number | null;
+  overallFeedback?: string | null;
+  strengths?: string[] | null;
+  improvements?: string[] | null;
+  answers?: BackendQuestionEvaluation[] | null;
 }
 
 interface BackendSessionListItem {
   sessionId: number;
-  sessionIdStr: string;
   roleType: string;
   status: string;
   currentPhase: string;
@@ -234,14 +237,14 @@ function clampQuestionCountFromDuration(plannedDuration?: number): number {
 
 function mapQuestionEvaluation(item: BackendQuestionEvaluation): VoiceAnswerDetail {
   return {
-    questionIndex: item.question_index || 0,
+    questionIndex: item.questionIndex || 0,
     question: item.question || '',
     category: item.category || '',
-    userAnswer: item.user_answer || '',
+    userAnswer: item.userAnswer || '',
     score: item.score || 0,
     feedback: item.feedback || '',
-    referenceAnswer: item.reference_answer || null,
-    keyPoints: item.key_points || [],
+    referenceAnswer: item.referenceAnswer || null,
+    keyPoints: item.keyPoints || [],
   };
 }
 
@@ -309,17 +312,18 @@ export const voiceInterviewApi = {
 
   async getEvaluation(sessionId: string): Promise<EvaluationStatusResponse> {
     const res = await request.get<BackendEvaluationStatus>(`/api/voice/sessions/${sessionId}/evaluation`);
+    const evaluation = res.evaluation;
     return {
-      evaluateStatus: res.evaluate_status,
-      evaluateError: res.evaluate_error,
-      evaluation: res.overall_score !== null ? {
-        sessionId: String(res.session_id),
-        totalQuestions: (res.question_evaluations || []).length,
-        overallScore: res.overall_score,
-        overallFeedback: res.overall_feedback || '',
-        strengths: res.strengths || [],
-        improvements: res.improvements || [],
-        answers: (res.question_evaluations || []).map(mapQuestionEvaluation),
+      evaluateStatus: res.evaluateStatus,
+      evaluateError: res.evaluateError,
+      evaluation: evaluation ? {
+        sessionId: String(evaluation.sessionId),
+        totalQuestions: evaluation.totalQuestions,
+        overallScore: evaluation.overallScore ?? 0,
+        overallFeedback: evaluation.overallFeedback || '',
+        strengths: evaluation.strengths || [],
+        improvements: evaluation.improvements || [],
+        answers: (evaluation.answers || []).map(mapQuestionEvaluation),
       } : null,
     };
   },
@@ -370,18 +374,42 @@ export const voiceInterviewApi = {
 
 export function subscribeVoiceEvaluationEvents(
   sessionId: string,
-  onUpdate: () => void,
-  onDisconnect: () => void,
+  onUpdate: (response: EvaluationStatusResponse) => void,
 ): () => void {
-  const eventSource = new EventSource(
-    `${API_BASE_URL}/api/voice/sessions/${sessionId}/evaluation/events`,
-  );
-  eventSource.onmessage = onUpdate;
-  eventSource.onerror = () => {
-    eventSource.close();
-    onDisconnect();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let closed = false;
+  let consecutiveErrors = 0;
+
+  const cleanup = () => {
+    closed = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
   };
-  return () => eventSource.close();
+
+  const poll = async () => {
+    if (closed) return;
+    try {
+      const response = await voiceInterviewApi.getEvaluation(sessionId);
+      if (closed) return;
+      consecutiveErrors = 0;
+      onUpdate(response);
+      if (response.evaluateStatus === 'COMPLETED' || response.evaluateStatus === 'COMPLETED_WITH_ERRORS' || response.evaluateStatus === 'FAILED') {
+        cleanup();
+        return;
+      }
+    } catch {
+      consecutiveErrors += 1;
+    }
+    if (!closed) {
+      const retryDelay = Math.min(3000 * 2 ** consecutiveErrors, 30000);
+      timer = setTimeout(poll, retryDelay);
+    }
+  };
+
+  void poll();
+  return cleanup;
 }
 
 export class VoiceInterviewWebSocket {

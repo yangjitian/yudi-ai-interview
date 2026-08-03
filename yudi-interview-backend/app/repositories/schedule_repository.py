@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.schedule import InterviewScheduleEntity, InterviewStatus
@@ -9,12 +9,6 @@ from app.models.schedule import InterviewScheduleEntity, InterviewStatus
 class ScheduleRepository:
   def __init__(self, session: AsyncSession):
     self.session = session
-
-  async def save(self, entity: InterviewScheduleEntity) -> InterviewScheduleEntity:
-    self.session.add(entity)
-    await self.session.flush()
-    await self.session.refresh(entity)
-    return entity
 
   async def find_by_id(self, schedule_id: int) -> InterviewScheduleEntity | None:
     result = await self.session.execute(
@@ -28,37 +22,27 @@ class ScheduleRepository:
       start: datetime | None = None,
       end: datetime | None = None,
   ) -> list[InterviewScheduleEntity]:
-    query = select(InterviewScheduleEntity)
-    if start is not None and end is not None:
-      query = query.where(InterviewScheduleEntity.interview_time.between(start, end))
-    elif status is not None:
-      query = query.where(InterviewScheduleEntity.status == status.value)
-    result = await self.session.execute(
-        query.order_by(InterviewScheduleEntity.interview_time.asc())
-    )
+    stmt = select(InterviewScheduleEntity)
+    if status is not None:
+      stmt = stmt.where(InterviewScheduleEntity.status == status.value)
+    if start is not None:
+      stmt = stmt.where(InterviewScheduleEntity.interview_time >= start)
+    if end is not None:
+      stmt = stmt.where(InterviewScheduleEntity.interview_time <= end)
+    stmt = stmt.order_by(InterviewScheduleEntity.interview_time.asc())
+    result = await self.session.execute(stmt)
     return list(result.scalars().all())
 
-  async def list_schedules(
-      self,
-      page: int,
-      page_size: int,
-      status: InterviewStatus | None = None,
-  ) -> tuple[list[InterviewScheduleEntity], int]:
-    query = select(InterviewScheduleEntity)
-    count_query = select(func.count(InterviewScheduleEntity.id))
-    if status is not None:
-      query = query.where(InterviewScheduleEntity.status == status.value)
-      count_query = count_query.where(InterviewScheduleEntity.status == status.value)
-    total = await self.session.scalar(count_query)
-    result = await self.session.execute(
-        query.order_by(InterviewScheduleEntity.interview_time.asc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-    )
-    return list(result.scalars().all()), int(total or 0)
+  async def save(self, entity: InterviewScheduleEntity) -> InterviewScheduleEntity:
+    self.session.add(entity)
+    await self.session.flush()
+    await self.session.refresh(entity)
+    return entity
 
   async def update(self, entity: InterviewScheduleEntity) -> InterviewScheduleEntity:
-    return await self.save(entity)
+    await self.session.flush()
+    await self.session.refresh(entity)
+    return entity
 
   async def delete(self, schedule_id: int) -> bool:
     entity = await self.find_by_id(schedule_id)
@@ -69,16 +53,15 @@ class ScheduleRepository:
     return True
 
   async def update_expired(self, cutoff: datetime) -> int:
-    # interview_time 所在表为 timestamp without time zone，按北京时间墙上时间比较。
-    if cutoff.tzinfo is not None:
-      from app.utils.timezone_utils import to_beijing_naive
-      cutoff = to_beijing_naive(cutoff)
-    result = await self.session.execute(
+    """将面试时间在 cutoff 之前且状态为 PENDING 的记录标记为 CANCELLED。"""
+    stmt = (
         update(InterviewScheduleEntity)
         .where(
             InterviewScheduleEntity.status == InterviewStatus.PENDING.value,
             InterviewScheduleEntity.interview_time < cutoff,
         )
-        .values(status=InterviewStatus.CANCELLED.value, updated_at=func.now())
+        .values(status=InterviewStatus.CANCELLED.value)
     )
-    return result.rowcount or 0
+    result = await self.session.execute(stmt)
+    await self.session.flush()
+    return result.rowcount

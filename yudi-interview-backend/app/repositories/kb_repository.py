@@ -1,10 +1,19 @@
-from sqlalchemy import func, select, update
+from datetime import datetime
+
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import BusinessException, ErrorCode
-from app.models.knowledge_base import KnowledgeBaseEntity, RagChatMessageEntity, RagChatSessionEntity, VectorStatus
-from app.utils.timezone_utils import get_beijing_now
+from app.models.knowledge_base import (
+    KnowledgeBaseEntity,
+    KnowledgeBaseQuestionEntity,
+    RagChatMessageEntity,
+    RagChatSessionEntity,
+    VectorStatus,
+    VectorStoreEntity,
+)
+from app.utils.timezone_utils import get_beijing_now_naive
 
 
 class KbRepository:
@@ -17,13 +26,78 @@ class KbRepository:
     )
     return result.scalar_one_or_none()
 
-  async def find_by_id_with_documents(self, kb_id: int) -> KnowledgeBaseEntity | None:
+  async def find_by_id_for_update(self, kb_id: int) -> KnowledgeBaseEntity | None:
     result = await self.session.execute(
         select(KnowledgeBaseEntity)
-        .options(selectinload(KnowledgeBaseEntity.documents))
         .where(KnowledgeBaseEntity.id == kb_id)
+        .with_for_update()
     )
     return result.scalar_one_or_none()
+
+  async def save_generation_state(
+      self,
+      entity: KnowledgeBaseEntity,
+  ) -> None:
+    self.session.add(entity)
+    await self.session.flush()
+
+  async def find_stale_question_generation_tasks(
+      self,
+      status: str,
+      threshold: datetime,
+  ) -> list[KnowledgeBaseEntity]:
+    result = await self.session.execute(
+        select(KnowledgeBaseEntity).where(
+            KnowledgeBaseEntity.question_gen_status == status,
+            (
+                KnowledgeBaseEntity.question_gen_updated_at.is_(None)
+                | (KnowledgeBaseEntity.question_gen_updated_at < threshold)
+            ),
+        )
+    )
+    return list(result.scalars().all())
+
+  async def search_chunks_by_vector(
+      self,
+      query_vector: list[float],
+      kb_ids: list[int],
+      top_k: int,
+      similarity_threshold: float,
+  ) -> list[dict]:
+    """向量相似度搜索，基于 vector_store 表（与 Java Spring AI 一致）。"""
+    from sqlalchemy import cast, String
+    distance = VectorStoreEntity.embedding.cosine_distance(query_vector)
+    # metadata->>'kb_id' 存储的是字符串形式的知识库 ID
+    kb_id_filters = [
+        VectorStoreEntity.metadata_["kb_id"].astext == str(kid)
+        for kid in kb_ids
+    ]
+    from sqlalchemy import or_
+    result = await self.session.execute(
+        select(
+            VectorStoreEntity.content,
+            distance,
+        )
+        .where(
+            VectorStoreEntity.embedding.is_not(None),
+            or_(*kb_id_filters),
+            distance <= 1 - similarity_threshold,
+        )
+        .order_by(distance)
+        .limit(top_k)
+    )
+    return [
+        {
+            "content": row[0],
+            "score": max(0.0, min(1.0, float(1 - row[1]))),
+            "source": "",
+        }
+        for row in result.all()
+    ]
+
+  async def find_by_id_with_documents(self, kb_id: int) -> KnowledgeBaseEntity | None:
+    """multi-document 模式已移除，等同于 find_by_id。"""
+    return await self.find_by_id(kb_id)
 
   async def find_by_hash(self, file_hash: str) -> KnowledgeBaseEntity | None:
     result = await self.session.execute(
@@ -124,6 +198,120 @@ class KbRepository:
     await self.session.flush()
 
 
+class KnowledgeBaseQuestionRepository:
+  def __init__(self, session: AsyncSession):
+    self.session = session
+
+  async def find_by_id(self, question_id: int) -> KnowledgeBaseQuestionEntity | None:
+    result = await self.session.execute(
+        select(KnowledgeBaseQuestionEntity).where(
+            KnowledgeBaseQuestionEntity.id == question_id
+        )
+    )
+    return result.scalar_one_or_none()
+
+  async def find_by_knowledge_base_id(
+      self,
+      knowledge_base_id: int,
+      status: str | None = None,
+  ) -> list[tuple[KnowledgeBaseQuestionEntity, str | None]]:
+    statement = (
+        select(KnowledgeBaseQuestionEntity, KnowledgeBaseEntity.name)
+        .outerjoin(
+            KnowledgeBaseEntity,
+            KnowledgeBaseQuestionEntity.knowledge_base_id == KnowledgeBaseEntity.id,
+        )
+        .where(KnowledgeBaseQuestionEntity.knowledge_base_id == knowledge_base_id)
+        .order_by(KnowledgeBaseQuestionEntity.updated_at.desc())
+    )
+    if status is not None:
+      statement = statement.where(KnowledgeBaseQuestionEntity.status == status)
+    result = await self.session.execute(statement)
+    return [(question, name) for question, name in result.all()]
+
+  async def find_category_counts(
+      self,
+      knowledge_base_id: int,
+  ) -> list[tuple[str, int]]:
+    count = func.count(KnowledgeBaseQuestionEntity.id)
+    result = await self.session.execute(
+        select(KnowledgeBaseQuestionEntity.category, count)
+        .where(
+            KnowledgeBaseQuestionEntity.knowledge_base_id == knowledge_base_id,
+            KnowledgeBaseQuestionEntity.category.is_not(None),
+            KnowledgeBaseQuestionEntity.category != "",
+        )
+        .group_by(KnowledgeBaseQuestionEntity.category)
+        .order_by(count.desc(), KnowledgeBaseQuestionEntity.category.asc())
+    )
+    return [(category, category_count) for category, category_count in result.all()]
+
+  async def find_active_for_interview(
+      self,
+      knowledge_base_id: int,
+      difficulty: str,
+      category: str | None = None,
+  ) -> list[KnowledgeBaseQuestionEntity]:
+    statement = (
+        select(KnowledgeBaseQuestionEntity)
+        .where(
+            KnowledgeBaseQuestionEntity.knowledge_base_id == knowledge_base_id,
+            KnowledgeBaseQuestionEntity.difficulty == difficulty,
+            KnowledgeBaseQuestionEntity.status == "ACTIVE",
+        )
+        .order_by(KnowledgeBaseQuestionEntity.updated_at.desc())
+    )
+    if category is not None:
+      statement = statement.where(KnowledgeBaseQuestionEntity.category == category)
+    result = await self.session.execute(statement)
+    return list(result.scalars().all())
+
+  async def find_recent_by_difficulty(
+      self,
+      knowledge_base_id: int,
+      difficulty: str,
+      limit: int = 20,
+  ) -> list[KnowledgeBaseQuestionEntity]:
+    result = await self.session.execute(
+        select(KnowledgeBaseQuestionEntity)
+        .where(
+            KnowledgeBaseQuestionEntity.knowledge_base_id == knowledge_base_id,
+            KnowledgeBaseQuestionEntity.difficulty == difficulty,
+        )
+        .order_by(KnowledgeBaseQuestionEntity.updated_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+  async def save(
+      self,
+      entity: KnowledgeBaseQuestionEntity,
+  ) -> KnowledgeBaseQuestionEntity:
+    self.session.add(entity)
+    await self.session.flush()
+    await self.session.refresh(entity)
+    return entity
+
+  async def delete(self, entity: KnowledgeBaseQuestionEntity) -> None:
+    await self.session.delete(entity)
+    await self.session.flush()
+
+  async def delete_by_knowledge_base_id(self, knowledge_base_id: int) -> None:
+    await self.session.execute(
+        delete(KnowledgeBaseQuestionEntity).where(
+            KnowledgeBaseQuestionEntity.knowledge_base_id == knowledge_base_id
+        )
+    )
+    await self.session.flush()
+
+  async def save_all(
+      self,
+      entities: list[KnowledgeBaseQuestionEntity],
+  ) -> None:
+    self.session.add_all(entities)
+    await self.session.flush()
+
+
 class RagChatRepository:
   def __init__(self, session: AsyncSession):
     self.session = session
@@ -193,7 +381,7 @@ class RagChatRepository:
     entity = await self.find_session_by_id(session_id)
     if entity:
       entity.title = title
-      entity.updated_at = get_beijing_now()
+      entity.updated_at = get_beijing_now_naive()
 
   async def toggle_pin(self, session_id: int) -> bool:
     entity = await self.find_session_by_id(session_id)
@@ -207,7 +395,7 @@ class RagChatRepository:
     await self.session.execute(
         update(RagChatMessageEntity)
         .where(RagChatMessageEntity.id == message_id)
-        .values(content=content, completed=True, updated_at=get_beijing_now())
+        .values(content=content, completed=True, updated_at=get_beijing_now_naive())
     )
 
   async def replace_session_knowledge_bases(

@@ -28,11 +28,13 @@ async def lifespan(app: FastAPI):
     await get_redis()
     # Task 1: 启动时预热 LLM 客户端连接池
     await init_llm_clients()
+    await _start_opening_audio_warmup()
     await _start_background_consumers()
     await _start_schedule_status_updater()
     yield
     await _stop_schedule_status_updater()
     await _stop_background_consumers()
+    await _stop_opening_audio_warmup()
     # Task 1: 关闭时清理 LLM 客户端连接池
     await shutdown_llm_clients()
     await close_redis()
@@ -42,6 +44,7 @@ async def lifespan(app: FastAPI):
 
 _consumers = []
 _schedule_status_task: asyncio.Task | None = None
+_opening_audio_warmup_task: asyncio.Task | None = None
 
 
 async def _start_background_consumers() -> None:
@@ -50,14 +53,22 @@ async def _start_background_consumers() -> None:
   try:
     from app.infrastructure.redis.analyze_consumer import AnalyzeStreamConsumer
     from app.infrastructure.redis.evaluate_producer import EvaluateStreamConsumer
+    from app.infrastructure.redis.voice_evaluate_consumer import VoiceEvaluateStreamConsumer
     from app.infrastructure.redis.vectorize_producer import VectorizeStreamConsumer
-    from app.infrastructure.redis.voice_evaluate_producer import VoiceEvaluateStreamConsumer
+    from app.infrastructure.redis.question_generation import (
+        QuestionGenerationRecoveryScheduler,
+        QuestionGenStreamConsumer,
+    )
+    from app.services.voice.session_cleanup import VoiceInterviewCleanupScheduler
 
     _consumers = [
         AnalyzeStreamConsumer(),
         EvaluateStreamConsumer(),
         VectorizeStreamConsumer(),
+        QuestionGenStreamConsumer(),
+        QuestionGenerationRecoveryScheduler(),
         VoiceEvaluateStreamConsumer(),
+        VoiceInterviewCleanupScheduler(),
     ]
     for c in _consumers:
       await c.start()
@@ -84,6 +95,31 @@ async def _stop_background_consumers() -> None:
 async def _start_schedule_status_updater() -> None:
   global _schedule_status_task
   _schedule_status_task = asyncio.create_task(_schedule_status_update_loop())
+
+
+async def _start_opening_audio_warmup() -> None:
+  global _opening_audio_warmup_task
+  from app.config.settings import get_settings
+
+  if not get_settings().voice_interview.app_voice_opening_audio_warmup_enabled:
+    logging.getLogger(__name__).info("Opening audio cache warmup is disabled")
+    return
+  from app.routers.voice_interview import warmup_opening_audio_cache
+
+  _opening_audio_warmup_task = asyncio.create_task(warmup_opening_audio_cache())
+
+
+async def _stop_opening_audio_warmup() -> None:
+  global _opening_audio_warmup_task
+  from app.routers.voice_interview import close_opening_audio_warmup_pool
+
+  if _opening_audio_warmup_task is not None:
+    if not _opening_audio_warmup_task.done():
+      _opening_audio_warmup_task.cancel()
+    with suppress(asyncio.CancelledError):
+      await _opening_audio_warmup_task
+    _opening_audio_warmup_task = None
+  await close_opening_audio_warmup_pool()
 
 
 async def _stop_schedule_status_updater() -> None:
@@ -130,12 +166,17 @@ def create_app() -> FastAPI:
   app.include_router(_import_resume_router(), tags=["简历"])
   app.include_router(_import_interview_router(), tags=["面试"])
   app.include_router(_import_kb_router(), tags=["知识库"])
+  app.include_router(
+      _import_kb_question_generation_router(),
+      tags=["知识库题目生成"],
+  )
+  app.include_router(_import_kb_interview_router(), tags=["知识库面试"])
   app.include_router(_import_knowledge_router(), tags=["知识库管理"])
   app.include_router(_import_rag_chat_router(), tags=["RAG 聊天"])
   app.include_router(_import_schedule_router(), tags=["面试日程"])
   app.include_router(_import_voice_router(), prefix="/api/voice", tags=["语音面试"])
   app.include_router(_import_voice_router(), prefix="/api/voice-interview", tags=["语音面试"])
-  app.include_router(_import_voice_ws_router(), prefix="/api/voice", tags=["语音面试"])
+  app.include_router(_import_voice_ws_router(), tags=["语音面试"])
   app.include_router(_import_llm_admin_router(), tags=["LLM 管理"])
   app.include_router(_import_skills_router(), tags=["技能管理"])
 
@@ -167,6 +208,14 @@ def _import_kb_router():
 def _import_knowledge_router():
   from app.routers.knowledge_base import _alias_router
   return _alias_router
+
+def _import_kb_interview_router():
+  from app.routers.knowledge_base import _interview_router
+  return _interview_router
+
+def _import_kb_question_generation_router():
+  from app.routers.knowledge_base import _question_generation_router
+  return _question_generation_router
 
 def _import_rag_chat_router():
   from app.routers.rag_chat import router

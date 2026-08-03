@@ -10,6 +10,7 @@ from app.core.errors import BusinessException, ErrorCode
 from app.core.result import ApiResponse
 from app.infrastructure.pdf.export import PdfExportService
 from app.models.resume_dto import ResumeListItemDTO, ResumeDetailDTO, ResumeUploadResponseDTO
+from app.repositories.interview_repository import InterviewRepository
 from app.repositories.resume_repository import ResumeRepository, ResumeAnalysisRepository
 from app.services.resume.delete import ResumeDeleteService
 from app.services.resume.grading import ResumeGradingService
@@ -144,7 +145,11 @@ async def delete_resume(
     resume_id: int = Path(description="简历ID"),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse:
-  delete_svc = ResumeDeleteService(ResumeRepository(db))
+  delete_svc = ResumeDeleteService(
+      ResumeRepository(db),
+      ResumeAnalysisRepository(db),
+      InterviewRepository(db),
+  )
   await delete_svc.delete_resume(resume_id)
   return ApiResponse.success()
 

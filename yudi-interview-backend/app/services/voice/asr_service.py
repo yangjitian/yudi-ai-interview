@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -35,6 +36,19 @@ from app.config.settings import get_settings
 
 log = logging.getLogger(__name__)
 settings = get_settings()
+_ASR_CONNECT_READY_TIMEOUT_SECONDS = 10.0
+_ASR_AUDIO_READY_TIMEOUT_SECONDS = 1.2
+
+_FILLER_ONLY_PATTERN = re.compile(
+    r"^(?:嗯+|呃+|额+|啊+|哦+|唔+|这个|那个)[，。！？、,.!?\s]*$"
+)
+
+
+def normalize_transcript(text: str, filter_filler_words: bool = True) -> str:
+    normalized = text.strip()
+    if filter_filler_words and _FILLER_ONLY_PATTERN.fullmatch(normalized):
+        return ""
+    return normalized
 
 
 @dataclass
@@ -171,7 +185,11 @@ class _AsrCallback:
     def _on_session_updated(self, msg: dict) -> None:
         if not self._conn._ready:
             self._conn._ready = True
-            self._conn._ready_event.set()
+            loop = self._conn._loop
+            if loop is not None:
+                loop.call_soon_threadsafe(self._conn._ready_event.set)
+            else:
+                self._conn._ready_event.set()
             self._safe_call(self._callbacks.on_ready)
         log.debug("[ASR %s] session.updated -> ready", self._conn._session_id)
 
@@ -191,12 +209,18 @@ class _AsrCallback:
                 text = delta.get("text") or delta.get("transcript") or ""
             elif isinstance(delta, str):
                 text = delta
-        if text.strip():
+        text = normalize_transcript(
+            text, self._conn._cfg.asr_filter_filler_words
+        )
+        if text:
             self._safe_call_async(self._callbacks.on_partial(text))
 
     def _on_completed(self, msg: dict) -> None:
         log.info("[ASR %s] _on_completed called, raw transcript=%r", self._conn._session_id, msg.get("transcript"))
-        text = (msg.get("transcript") or "").strip()
+        text = normalize_transcript(
+            msg.get("transcript") or "",
+            self._conn._cfg.asr_filter_filler_words,
+        )
         if text:
             log.info("[ASR %s] Sentence completed: %s", self._conn._session_id, text)
             self._safe_call_async(self._callbacks.on_sentence_end(text))
@@ -332,22 +356,37 @@ class AsrSession:
 
         # update_session 也是阻塞调用
         def _update_blocking() -> None:
-            try:
-                self._conversation.update_session(**session_cfg)
-            except Exception as e:
-                log.error("[ASR %s] update_session failed: %s", self._session_id, e)
-                self._running = False
-                try:
-                    self._callbacks.on_error(e)
-                except Exception:
-                    pass
+            self._conversation.update_session(**session_cfg)
 
-        await asyncio.to_thread(_update_blocking)
+        try:
+            await asyncio.to_thread(_update_blocking)
+            await asyncio.wait_for(
+                self._ready_event.wait(),
+                timeout=_ASR_CONNECT_READY_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            await self.close()
+            raise RuntimeError(
+                f"ASR session ready timeout: {self._session_id}"
+            ) from exc
+        except Exception:
+            await self.close()
+            raise
 
     async def send_audio(self, audio_data: bytes) -> None:
         """发送音频帧到 ASR 服务。"""
         if not self._conversation or not self._running:
             raise RuntimeError(f"ASR session not ready: {self._session_id}")
+        if not self._ready:
+            try:
+                await asyncio.wait_for(
+                    self._ready_event.wait(),
+                    timeout=_ASR_AUDIO_READY_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    f"ASR session not ready: {self._session_id}"
+                ) from exc
 
         b64 = base64.b64encode(audio_data).decode("ascii")
         try:

@@ -59,9 +59,8 @@ class TtsConnection:
         self._in_use = False  # 是否正在使用
         self._reuse_count = 0  # 复用次数
         self._reset_task: asyncio.Task | None = None  # 异步重置任务
-        # Task A1: 空闲追踪
-        self._last_used_at = time.monotonic()
         self._rebuilding = False  # 防止并发重建
+        self._closing = False
 
     @property
     def is_ready(self) -> bool:
@@ -73,6 +72,8 @@ class TtsConnection:
 
     async def connect(self) -> None:
         """建立 TTS WebSocket 连接并完成 session.update。"""
+        started_at = time.perf_counter()
+        self._closing = False
         try:
             from dashscope.audio.qwen_tts_realtime import (
                 QwenTtsRealtime,
@@ -131,8 +132,17 @@ class TtsConnection:
 
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=10.0)
+            log.info(
+                "[TTS-conn %s] connect ready (took %.1fms)",
+                self._conn_id,
+                (time.perf_counter() - started_at) * 1000,
+            )
         except asyncio.TimeoutError:
-            log.warning("[TTS-conn %s] not ready within 10s (update_session may have silently failed)", self._conn_id)
+            log.warning(
+                "[TTS-conn %s] not ready within 10s (took %.1fms)",
+                self._conn_id,
+                (time.perf_counter() - started_at) * 1000,
+            )
 
     def _schedule_ready_fail(self, err: Exception) -> None:
         if self._loop and not self._ready_event.is_set():
@@ -238,9 +248,6 @@ class TtsConnection:
         """
         self._in_use = False
         self._reuse_count += 1
-        # Task A1: 追踪最后使用时间（用于心跳保活）
-        self._last_used_at = time.monotonic()
-
         # session 会自动准备好下一次 commit，直接标记为 ready
         if not self._ready:
             self._ready = True
@@ -249,48 +256,6 @@ class TtsConnection:
 
         log.info("[TTS-conn %s] released (reuse_count=%d) → ready",
                  self._conn_id, self._reuse_count)
-
-    async def ping_or_silent_synthesize(self) -> None:
-        """
-        Task A2: 心跳保活。
-
-        发送极短文本合成保持连接活跃，阻止服务端因 Idle Timeout 断开连接。
-        使用中文语气词 "嗯" 作为最小文本（1-2个字足以触发合成）。
-
-        走与正常业务相同的锁定流程：
-        mark_in_use → synthesize → release
-        """
-        import time
-
-        if not self._ready or self._in_use or self._rebuilding:
-            return
-
-        t_start = time.perf_counter_ns()
-        idle_sec = time.monotonic() - self._last_used_at
-        self.mark_in_use()
-        log.info("[TTS-conn %s] keepalive: acquired (idle=%.1fs)", self._conn_id, idle_sec)
-
-        try:
-            done_event = asyncio.Event()
-
-            def on_audio(chunk: bytes) -> None:
-                pass
-
-            def on_complete() -> None:
-                done_event.set()
-
-            def on_error(e: Exception) -> None:
-                log.warning("[TTS-conn %s] keepalive synthesize error: %s", self._conn_id, e)
-                done_event.set()
-
-            await self.synthesize("嗯", on_audio, on_complete, on_error)
-            await asyncio.wait_for(done_event.wait(), timeout=5.0)
-            elapsed_ms = (time.perf_counter_ns() - t_start) / 1_000_000
-            log.info("[TTS-conn %s] keepalive: released (took %.1fms)", self._conn_id, elapsed_ms)
-        except Exception as e:
-            log.warning("[TTS-conn %s] keepalive failed: %s", self._conn_id, e)
-        finally:
-            self.release()
 
     async def _async_reset(self) -> None:
         """
@@ -422,6 +387,8 @@ class TtsConnection:
                 self._loop.call_soon_threadsafe(session.fire_error, RuntimeError(text))
 
     async def close(self) -> None:
+        self._closing = True
+        self._ready = False
         def _close() -> None:
             if self._tts:
                 try:
@@ -451,10 +418,17 @@ class _SynthSession:
         self.conn = conn  # 引用 TtsConnection，用于触发异步重置
         self.done_event = asyncio.Event()
         self._audio_count = 0
+        self._started_at = time.perf_counter()
 
     def fire_audio(self, chunk: bytes) -> None:
         if self.done_event.is_set():
             return
+        if self._audio_count == 0 and self.conn:
+            log.info(
+                "[TTS-conn %s] first audio chunk (took %.1fms)",
+                self.conn._conn_id,
+                (time.perf_counter() - self._started_at) * 1000,
+            )
         self._audio_count += 1
         try:
             self.on_audio(chunk)
@@ -465,6 +439,12 @@ class _SynthSession:
         if self.done_event.is_set():
             return
         self.done_event.set()
+        if self.conn:
+            log.info(
+                "[TTS-conn %s] synthesis callback complete (took %.1fms)",
+                self.conn._conn_id,
+                (time.perf_counter() - self._started_at) * 1000,
+            )
 
         # Task 2: 触发连接异步重置
         if self.conn:
@@ -503,6 +483,9 @@ class _StreamingTtsCallback:
 
     def on_close(self, code, reason) -> None:
         log.warning("[TTS-conn %s] on_close code=%s reason=%s", self._conn_id, code, reason)
+        if self._conn._closing:
+            log.info("[TTS-conn %s] intentional close, skip rebuild", self._conn_id)
+            return
         # Task A1: 检测 Idle Timeout 并触发重建
         reason_str = str(reason) if reason else ""
         is_idle_timeout = "Idle timeout" in reason_str or "timeout" in reason_str.lower()
@@ -547,14 +530,12 @@ class TtsPool:
     2. 连接使用后立即触发异步重置
     3. acquire 时等待连接变为 ready 状态
 
-    Task A2: 心跳保活机制，防止服务端 Idle Timeout 断开连接。
+    空闲连接池自动收缩；下次业务请求到来时按需重建。
     """
 
     # 默认连接池大小
     DEFAULT_POOL_SIZE = 5
-    # 心跳间隔（秒）= 服务端 Idle Timeout 的 50%
-    # DashScope qwen-tts-realtime 服务端 Idle Timeout 约为 30~60 秒
-    KEEPALIVE_INTERVAL = 25  # 每 25 秒检查一次空闲连接
+    IDLE_CHECK_INTERVAL = 30
 
     def __init__(self, pool_size: int) -> None:
         self._pool_size = max(1, pool_size or self.DEFAULT_POOL_SIZE)
@@ -563,71 +544,123 @@ class TtsPool:
         self._started = False
         self._start_lock = asyncio.Lock()
         self._poll_interval = 0.05  # 50ms 轮询间隔
-        self._keepalive_task: asyncio.Task | None = None
+        self._idle_close_task: asyncio.Task | None = None
+        self._background_warmup_task: asyncio.Task | None = None
+        self._warmup_tasks: set[asyncio.Task] = set()
+        self._warming_connections: set[TtsConnection] = set()
+        self._closing = False
+        self._last_business_used_at = time.monotonic()
 
     async def warmup(self) -> None:
         async with self._start_lock:
             if self._started:
                 return
+            self._closing = False
+            warmup_started_at = time.perf_counter()
             log.info("[TtsPool] Warming up %d TTS connections (concurrent)", self._pool_size)
             conns = [TtsConnection(f"pool_{i}", self._cfg) for i in range(self._pool_size)]
-            # 并发连接所有连接，捕获每个连接的异常以便诊断
-            results = await asyncio.gather(
-                *(c.connect() for c in conns),
-                return_exceptions=True,
-            )
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    log.error("[TtsPool] Connection %d raised during warmup: %s", i, result)
-            for c in conns:
-                self._connections.append(c)
+            self._warming_connections.update(conns)
+            tasks = {
+                asyncio.create_task(self._connect_for_warmup(conn))
+                for conn in conns
+            }
+            self._warmup_tasks.update(tasks)
+            for task in tasks:
+                task.add_done_callback(self._warmup_tasks.discard)
+
+            pending = set(tasks)
+            while pending and not self._connections:
+                done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    await self._accept_warmed_connection(task)
+
+            if not self._connections:
+                raise RuntimeError("No TTS connection became ready during warmup")
+
             self._started = True
-            ready_count = sum(1 for c in conns if c.is_ready)
-            log.info("[TtsPool] Warmup done: %d/%d connections ready", ready_count, len(conns))
+            self._last_business_used_at = time.monotonic()
+            self._idle_close_task = asyncio.create_task(self._idle_close_loop())
+            log.info(
+                "[TtsPool] First connection ready: %d/%d available (took %.1fms)",
+                len(self._connections),
+                len(conns),
+                (time.perf_counter() - warmup_started_at) * 1000,
+            )
+            if pending:
+                self._background_warmup_task = asyncio.create_task(
+                    self._finish_background_warmup(pending, warmup_started_at)
+                )
 
-            # Task A2: 启动心跳保活
-            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+    async def _connect_for_warmup(self, conn: TtsConnection) -> TtsConnection:
+        await conn.connect()
+        return conn
 
-    async def _keepalive_loop(self) -> None:
-        """Task A2: 心跳保活循环，防止服务端 Idle Timeout 断开连接。"""
-        log.info("[TtsPool] Keepalive loop started (interval=%ds)", self.KEEPALIVE_INTERVAL)
+    async def _accept_warmed_connection(self, task: asyncio.Task) -> None:
+        try:
+            conn = await task
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            log.error("[TtsPool] Connection raised during warmup: %s", exc)
+            return
+        self._warming_connections.discard(conn)
+        if conn.is_ready and not self._closing:
+            if conn not in self._connections:
+                self._connections.append(conn)
+            return
+        await conn.close()
+
+    async def _finish_background_warmup(
+        self,
+        pending: set[asyncio.Task],
+        warmup_started_at: float,
+    ) -> None:
+        try:
+            for task in asyncio.as_completed(pending):
+                await self._accept_warmed_connection(task)
+                log.info(
+                    "[TtsPool] Background warmup progress: %d/%d ready (elapsed %.1fms)",
+                    len(self._connections),
+                    self._pool_size,
+                    (time.perf_counter() - warmup_started_at) * 1000,
+                )
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._background_warmup_task = None
+
+    async def _idle_close_loop(self) -> None:
+        """业务空闲超过阈值后关闭全部连接，避免后台持续占用资源。"""
+        idle_timeout = max(
+            1,
+            self._cfg.app_voice_tts_pool_idle_timeout_seconds,
+        )
+        check_interval = min(self.IDLE_CHECK_INTERVAL, idle_timeout)
+        log.info("[TtsPool] Idle close loop started (timeout=%ds)", idle_timeout)
         while self._started:
             try:
-                await asyncio.sleep(self.KEEPALIVE_INTERVAL)
+                await asyncio.sleep(check_interval)
                 if not self._started:
                     break
-                await self._send_keepalive()
+                idle_seconds = time.monotonic() - self._last_business_used_at
+                if idle_seconds < idle_timeout:
+                    continue
+                if any(conn._in_use for conn in self._connections):
+                    continue
+                log.info(
+                    "[TtsPool] Closing idle pool after %.1fs without business synthesis",
+                    idle_seconds,
+                )
+                await self.close()
+                break
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log.warning("[TtsPool] keepalive loop error: %s", e)
-        log.info("[TtsPool] Keepalive loop stopped")
-
-    async def _send_keepalive(self) -> None:
-        """Task A2: 对空闲连接发送心跳保活。"""
-        for conn in self._connections:
-            if not conn.is_ready or conn._in_use or conn._rebuilding:
-                continue
-            idle_sec = time.monotonic() - conn._last_used_at
-            # 超过 KEEPALIVE_INTERVAL 秒未使用的连接，发送心跳
-            if idle_sec >= self.KEEPALIVE_INTERVAL:
-                try:
-                    await conn.ping_or_silent_synthesize()
-                except Exception as e:
-                    log.warning("[TTS-conn %s] keepalive failed: %s", conn._conn_id, e)
-
-    async def shutdown(self) -> None:
-        """Task A2: 关闭连接池，停止心跳。"""
-        self._started = False
-        if self._keepalive_task:
-            self._keepalive_task.cancel()
-            try:
-                await self._keepalive_task
-            except asyncio.CancelledError:
-                pass
-        for conn in self._connections:
-            await conn.close()
-        self._connections.clear()
+                log.warning("[TtsPool] idle close loop error: %s", e)
+        log.info("[TtsPool] Idle close loop stopped")
 
     async def acquire(self) -> TtsConnection | None:
         """
@@ -651,6 +684,7 @@ class TtsPool:
                     log.info("[TtsPool] ... (suppressing further check logs)")
                 if conn.is_ready:
                     conn.mark_in_use()
+                    self._last_business_used_at = time.monotonic()
                     waited_ms = (time.perf_counter_ns() - acquire_start) / 1_000_000
                     log.info("[TTS-conn %s] acquired (waited=%.1fms, reuse_count=%d)",
                              conn._conn_id, waited_ms, conn.reuse_count)
@@ -724,10 +758,31 @@ class TtsPool:
             await self.release(conn)
 
     async def close(self) -> None:
+        self._closing = True
         self._started = False
-        for c in self._connections:
+        background_warmup_task = self._background_warmup_task
+        if background_warmup_task:
+            background_warmup_task.cancel()
+        for task in tuple(self._warmup_tasks):
+            task.cancel()
+        if self._warmup_tasks:
+            await asyncio.gather(*self._warmup_tasks, return_exceptions=True)
+        self._warmup_tasks.clear()
+        if background_warmup_task:
+            await asyncio.gather(background_warmup_task, return_exceptions=True)
+        self._background_warmup_task = None
+        if self._idle_close_task and self._idle_close_task is not asyncio.current_task():
+            self._idle_close_task.cancel()
+            try:
+                await self._idle_close_task
+            except asyncio.CancelledError:
+                pass
+        self._idle_close_task = None
+        connections = set(self._connections) | self._warming_connections
+        for c in connections:
             await c.close()
         self._connections.clear()
+        self._warming_connections.clear()
 
 
 def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:

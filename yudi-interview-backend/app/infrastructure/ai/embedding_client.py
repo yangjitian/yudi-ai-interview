@@ -5,6 +5,9 @@ from app.models.knowledge_base import EMBEDDING_DIMENSION
 
 
 class EmbeddingClient:
+  # 阿里云 DashScope Embedding API 批量大小限制（与 Java 版 MAX_BATCH_SIZE 一致）
+  MAX_BATCH_SIZE = 10
+
   async def embed_text(self, text: str) -> list[float]:
     client = await get_embedding_client()
     if hasattr(client, "aembed_query"):
@@ -18,10 +21,15 @@ class EmbeddingClient:
     if not texts:
       return []
 
+    # 过滤非字符串和空值，防止 DashScope API 报 400
+    valid_texts = [t for t in texts if isinstance(t, str) and t.strip()]
+    if not valid_texts:
+      raise ValueError("无有效的文本块可供向量化")
+
     client = await get_embedding_client()
     embeddings: list[list[float]] = []
-    for start in range(0, len(texts), 25):
-      batch = texts[start:start + 25]
+    for start in range(0, len(valid_texts), self.MAX_BATCH_SIZE):
+      batch = valid_texts[start:start + self.MAX_BATCH_SIZE]
       if hasattr(client, "aembed_documents"):
         result = await client.aembed_documents(batch)
       else:

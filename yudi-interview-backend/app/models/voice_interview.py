@@ -21,13 +21,13 @@ class VoiceInterviewSessionEntity(Base):
   planned_duration: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
   project_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
   tech_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-  created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-  end_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-  paused_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+  created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+  end_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+  paused_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
   resume_id: Mapped[Optional[int]] = mapped_column(ForeignKey("resumes.id"), nullable=True)
-  resumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-  start_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-  updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+  resumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+  start_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+  updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
   difficulty: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
   llm_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
   skill_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
@@ -48,11 +48,11 @@ class VoiceInterviewMessageEntity(Base):
 
   id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
   sequence_num: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-  created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+  created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
   session_id: Mapped[Optional[int]] = mapped_column(
       ForeignKey("voice_interview_sessions.id", ondelete="CASCADE"), nullable=True
   )
-  timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+  timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
   ai_generated_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
   message_type: Mapped[str] = mapped_column(String(255), nullable=False)
   phase: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -64,10 +64,12 @@ class VoiceInterviewEvaluationEntity(Base):
 
   id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
   overall_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-  created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-  interview_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+  created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+  interview_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
   session_id: Mapped[Optional[int]] = mapped_column(
-      ForeignKey("voice_interview_sessions.id", ondelete="CASCADE"), nullable=True
+      ForeignKey("voice_interview_sessions.id", ondelete="CASCADE"),
+      nullable=True,
+      unique=True,
   )
   improvements_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
   interviewer_role: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)

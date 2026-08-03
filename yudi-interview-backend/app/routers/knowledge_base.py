@@ -2,16 +2,62 @@ import logging
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Path as ApiPath, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Path as ApiPath,
+    Query,
+    Request,
+    UploadFile,
+)
+from pydantic import BaseModel, BeforeValidator, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
-from app.core.errors import BusinessException, ErrorCode
+from app.core.errors import (
+    BusinessException,
+    ErrorCode,
+    RateLimitExceededException,
+)
 from app.core.result import ApiResponse
+from app.infrastructure.redis.question_generation import (
+    QuestionGenStreamProducer,
+    cancel_running_question_generation,
+)
+from app.infrastructure.redis.session_cache import SessionCache
+from app.middleware.rate_limit import RateLimitConfig, check_rate_limit
 from app.models.knowledge_base import VectorStatus
-from app.models.kb_dto import KnowledgeBaseListItemDTO, KnowledgeDocumentDTO, QueryRequest, QueryResponse
-from app.repositories.kb_repository import KbRepository, RagChatRepository
+from app.models.kb_dto import (
+    CreateKnowledgeBaseInterviewRequest,
+    CreateKnowledgeBaseQuestionRequest,
+    KnowledgeBaseInterviewCapacityResponse,
+    KnowledgeBaseInterviewQuestionResponse,
+    KnowledgeBaseInterviewSessionResponse,
+    KnowledgeBaseListItemDTO,
+    KnowledgeBaseQuestionCategoryCount,
+    KnowledgeBaseQuestionDTO,
+    KnowledgeBaseQuestionStatus,
+    KnowledgeDocumentDTO,
+    QuestionGenerationConfig,
+    QuestionGenerationStatusResponse,
+    QueryRequest,
+    QueryResponse,
+    UpdateKnowledgeBaseQuestionRequest,
+    UpdateKnowledgeBaseQuestionStatusRequest,
+)
+from app.repositories.kb_repository import (
+    KbRepository,
+    KnowledgeBaseQuestionRepository,
+    RagChatRepository,
+)
+from app.repositories.interview_repository import InterviewAnswerRepository, InterviewRepository
+from app.services.interview.session_service import InterviewSessionService
+from app.services.kb.interview import KnowledgeBaseInterviewService
 from app.services.kb.query import KnowledgeBaseQueryService
+from app.services.kb.question_generation_state import QuestionGenerationStateService
+from app.services.kb.questions import KnowledgeBaseQuestionService
 from app.services.kb.upload import KnowledgeBaseUploadService
 
 
@@ -19,6 +65,37 @@ log = logging.getLogger(__name__)
 
 # 主路由：/api/knowledge-base（与 Java 版本一致）
 router = APIRouter(prefix="/api/knowledge-base", tags=["知识库"])
+_interview_router = APIRouter(
+    prefix="/api/knowledge-base-interviews",
+    tags=["知识库面试"],
+)
+_question_generation_router = APIRouter(
+    prefix="/api/knowledgebase",
+    tags=["知识库题目生成"],
+)
+
+_QUESTION_GENERATION_RATE_LIMIT_KEY = (
+    "{KnowledgeBaseInterviewController:generateQuestions}"
+)
+_QUESTION_GENERATION_RATE_LIMITS = (
+    RateLimitConfig(count=2, interval_seconds=1, dimension="GLOBAL"),
+    RateLimitConfig(count=2, interval_seconds=1, dimension="IP"),
+)
+
+
+class GenerateKnowledgeBaseQuestionsRequest(BaseModel):
+  difficulty: str | None = Field(
+      default=None,
+      pattern="^(junior|mid|senior)$",
+  )
+  questionCount: int = Field(ge=1, le=30)
+  followUpCount: int | None = Field(default=None, ge=0, le=5)
+  categoryLimit: int = Field(ge=1, le=5)
+  llmProvider: str | None = Field(default=None, max_length=64)
+
+
+def _empty_string_to_none(value: str | None) -> str | None:
+  return None if value == "" else value
 
 
 def _to_document_dto(entity, kb_id: int) -> KnowledgeDocumentDTO:
@@ -34,6 +111,292 @@ def _to_document_dto(entity, kb_id: int) -> KnowledgeDocumentDTO:
       createdAt=entity.created_at,
       updatedAt=entity.updated_at,
   )
+
+
+def _question_service(db: AsyncSession) -> KnowledgeBaseQuestionService:
+  return KnowledgeBaseQuestionService(
+      KbRepository(db),
+      KnowledgeBaseQuestionRepository(db),
+  )
+
+
+def _question_generation_state_service(
+    db: AsyncSession = Depends(get_db),
+) -> QuestionGenerationStateService:
+  return QuestionGenerationStateService(
+      KbRepository(db),
+      KnowledgeBaseQuestionRepository(db),
+  )
+
+
+def _question_generation_producer() -> QuestionGenStreamProducer:
+  return QuestionGenStreamProducer()
+
+
+async def _check_question_generation_rate_limit(request: Request) -> None:
+  for config in _QUESTION_GENERATION_RATE_LIMITS:
+    allowed, _remaining = await check_rate_limit(
+        request,
+        _QUESTION_GENERATION_RATE_LIMIT_KEY,
+        config,
+    )
+    if not allowed:
+      raise RateLimitExceededException()
+
+
+def _knowledge_base_interview_service(
+    db: AsyncSession,
+) -> KnowledgeBaseInterviewService:
+  return KnowledgeBaseInterviewService(
+      KbRepository(db),
+      KnowledgeBaseQuestionRepository(db),
+      InterviewSessionService(
+          session_repo=InterviewRepository(db),
+          answer_repo=InterviewAnswerRepository(db),
+          session_cache=SessionCache(),
+      ),
+  )
+
+
+def _to_knowledge_base_interview_response(
+    session,
+) -> KnowledgeBaseInterviewSessionResponse:
+  return KnowledgeBaseInterviewSessionResponse(
+      sessionId=session.session_id,
+      resumeText=session.resume_text,
+      totalQuestions=session.total_questions,
+      currentQuestionIndex=session.current_index,
+      questions=[
+          KnowledgeBaseInterviewQuestionResponse(
+              questionIndex=question.question_index,
+              question=question.question,
+              type=question.type,
+              category=question.category,
+              topicSummary=question.topic_summary,
+              userAnswer=question.answer,
+              score=question.score,
+              feedback=question.feedback,
+              isFollowUp=question.is_follow_up,
+              parentQuestionIndex=question.parent_question_index,
+              referenceAnswer=question.reference_answer,
+              keyPoints=question.key_points,
+              scoringRubric=question.scoring_rubric,
+              sourceContext=question.source_context,
+          )
+          for question in session.questions
+      ],
+      status=session.status,
+      knowledgeBaseId=session.knowledge_base_id,
+      interviewCategory=session.interview_category,
+  )
+
+
+@_question_generation_router.post(
+    "/{kb_id}/questions/generate",
+    response_model=ApiResponse[QuestionGenerationStatusResponse],
+    dependencies=[Depends(_check_question_generation_rate_limit)],
+)
+async def generate_knowledge_base_questions(
+    request: GenerateKnowledgeBaseQuestionsRequest,
+    kb_id: int = ApiPath(description="知识库 ID"),
+    state_service: QuestionGenerationStateService = Depends(
+        _question_generation_state_service
+    ),
+    producer: QuestionGenStreamProducer = Depends(
+        _question_generation_producer
+    ),
+) -> ApiResponse:
+  config = QuestionGenerationConfig(
+      difficulty=request.difficulty or "mid",
+      questionCount=request.questionCount,
+      followUpCount=(
+          request.followUpCount if request.followUpCount is not None else 2
+      ),
+      categoryLimit=request.categoryLimit,
+      llmProvider=(
+          request.llmProvider.strip()
+          if request.llmProvider and request.llmProvider.strip()
+          else None
+      ),
+  )
+  task_id = await state_service.submit(kb_id, config)
+  response = await state_service.get_status(kb_id)
+  sent = await producer.send_generate_task(kb_id, task_id, 0)
+  if not sent:
+    state_service.session.expire_all()
+    response = await state_service.get_status(kb_id)
+  return ApiResponse.success(data=response)
+
+
+@_question_generation_router.get(
+    "/{kb_id}/questions/generation-status",
+    response_model=ApiResponse[QuestionGenerationStatusResponse],
+)
+async def get_question_generation_status(
+    kb_id: int = ApiPath(description="知识库 ID"),
+    state_service: QuestionGenerationStateService = Depends(
+        _question_generation_state_service
+    ),
+) -> ApiResponse:
+  return ApiResponse.success(data=await state_service.get_status(kb_id))
+
+
+@_question_generation_router.post(
+    "/{kb_id}/questions/generation/cancel",
+    response_model=ApiResponse[QuestionGenerationStatusResponse],
+)
+async def cancel_question_generation(
+    kb_id: int = ApiPath(description="知识库 ID"),
+    state_service: QuestionGenerationStateService = Depends(
+        _question_generation_state_service
+    ),
+) -> ApiResponse:
+  response = await state_service.cancel(kb_id)
+  running_task_interrupted = False
+  if (
+      response.questionGenStatus.value == "CANCELLED"
+      and response.questionGenTaskId is not None
+  ):
+    running_task_interrupted = cancel_running_question_generation(
+        response.questionGenTaskId
+    )
+  log.info(
+      "题目生成取消请求已处理: kbId=%d taskId=%s status=%s "
+      "savedCount=%d runningTaskInterrupted=%s",
+      kb_id,
+      response.questionGenTaskId,
+      response.questionGenStatus.value,
+      response.savedCount,
+      running_task_interrupted,
+  )
+  return ApiResponse.success(data=response)
+
+
+@_interview_router.post(
+    "/sessions",
+    response_model=ApiResponse[KnowledgeBaseInterviewSessionResponse],
+)
+async def create_knowledge_base_interview_session(
+    request: CreateKnowledgeBaseInterviewRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+  session = await _knowledge_base_interview_service(db).create_session(request)
+  return ApiResponse.success(data=_to_knowledge_base_interview_response(session))
+
+
+# ========== 题库手工管理 API ==========
+
+@router.get(
+    "/{kb_id}/questions",
+    response_model=ApiResponse[list[KnowledgeBaseQuestionDTO]],
+)
+async def list_questions(
+    kb_id: int = ApiPath(description="知识库 ID"),
+    status: Annotated[
+        KnowledgeBaseQuestionStatus | None,
+        BeforeValidator(_empty_string_to_none),
+        Query(),
+    ] = None,
+    category: str | None = Query(default=None),
+    difficulty: str | None = Query(default=None),
+    keyword: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+  result = await _question_service(db).list_questions(
+      kb_id,
+      status,
+      category,
+      difficulty,
+      keyword,
+  )
+  return ApiResponse.success(data=result)
+
+
+@router.get(
+    "/{kb_id}/questions/categories",
+    response_model=ApiResponse[list[KnowledgeBaseQuestionCategoryCount]],
+)
+async def list_question_categories(
+    kb_id: int = ApiPath(description="知识库 ID"),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+  result = await _question_service(db).list_categories(kb_id)
+  return ApiResponse.success(data=result)
+
+
+@router.get(
+    "/{kb_id}/interview-capacity",
+    response_model=ApiResponse[KnowledgeBaseInterviewCapacityResponse],
+)
+async def get_interview_capacity(
+    kb_id: int = ApiPath(description="知识库 ID"),
+    category: str | None = Query(default=None),
+    difficulty: str = Query(default="mid"),
+    main_question_count: int = Query(
+        default=5,
+        alias="mainQuestionCount",
+        ge=1,
+        le=20,
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+  result = await _knowledge_base_interview_service(db).get_capacity(
+      kb_id,
+      category,
+      difficulty,
+      main_question_count,
+  )
+  return ApiResponse.success(data=result)
+
+@router.post(
+    "/{kb_id}/questions",
+    response_model=ApiResponse[KnowledgeBaseQuestionDTO],
+)
+async def create_question(
+    request: CreateKnowledgeBaseQuestionRequest,
+    kb_id: int = ApiPath(description="知识库 ID"),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+  result = await _question_service(db).create_question(kb_id, request)
+  return ApiResponse.success(data=result)
+
+
+@router.put(
+    "/questions/{question_id}",
+    response_model=ApiResponse[KnowledgeBaseQuestionDTO],
+)
+async def update_question(
+    request: UpdateKnowledgeBaseQuestionRequest,
+    question_id: int = ApiPath(description="题目 ID"),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+  result = await _question_service(db).update_question(question_id, request)
+  return ApiResponse.success(data=result)
+
+
+@router.put(
+    "/questions/{question_id}/status",
+    response_model=ApiResponse[KnowledgeBaseQuestionDTO],
+)
+async def update_question_status(
+    request: UpdateKnowledgeBaseQuestionStatusRequest,
+    question_id: int = ApiPath(description="题目 ID"),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+  result = await _question_service(db).update_status(question_id, request.status)
+  return ApiResponse.success(data=result)
+
+
+@router.delete(
+    "/questions/{question_id}",
+    response_model=ApiResponse[None],
+)
+async def delete_question(
+    question_id: int = ApiPath(description="题目 ID"),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+  await _question_service(db).delete_question(question_id)
+  return ApiResponse.success()
 
 
 # ========== 上传下载 API ==========
@@ -382,9 +745,15 @@ async def revectorize_document(
   entity = await kb_repo.find_by_id(kb_id)
   if entity is None:
     raise BusinessException(ErrorCode.NOT_FOUND, "知识库不存在")
-  if entity.content_text:
-    from app.infrastructure.redis.vectorize_producer import send_vectorize_task
-    await send_vectorize_task(kb_id, entity.content_text)
+  # content_text 列不存在于数据库，需从 S3 重新下载并解析
+  if not entity.storage_key:
+    raise BusinessException(ErrorCode.BAD_REQUEST, "知识库无存储文件，无法重新向量化")
+  from app.infrastructure.storage.file_storage import download_file
+  from app.infrastructure.parser.document_parser import parse_document
+  from app.infrastructure.redis.vectorize_producer import send_vectorize_task
+  file_data, _ = await download_file(entity.storage_key)
+  text = await parse_document(file_data, entity.content_type, entity.original_filename)
+  await send_vectorize_task(kb_id, text)
   return ApiResponse.success()
 
 

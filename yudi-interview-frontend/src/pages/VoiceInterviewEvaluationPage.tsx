@@ -25,7 +25,6 @@ export default function VoiceInterviewEvaluationPage() {
       ? subscribeVoiceEvaluationEvents(
           sessionId,
           () => void loadEvaluation(false),
-          () => startPolling(),
         )
       : undefined;
     return () => {

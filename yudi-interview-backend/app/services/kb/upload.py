@@ -1,21 +1,15 @@
 import logging
-from pathlib import Path
 from uuid import uuid4
-
-from sqlalchemy.orm import selectinload
 
 from app.utils.file_hash import compute_sha256
 from app.infrastructure.storage.file_storage import generate_storage_key, upload_file, delete_file, generate_public_url
 from app.models.knowledge_base import (
     KnowledgeBaseEntity,
-    KnowledgeBaseStatus,
-    KnowledgeChunkEntity,
-    KnowledgeDocumentEntity,
     VectorStatus,
+    VectorStoreEntity,
 )
 from app.repositories.kb_repository import KbRepository
 from app.infrastructure.parser.document_parser import parse_document
-from app.infrastructure.redis.vectorize_producer import send_vectorize_task
 from app.infrastructure.ai.embedding_client import EmbeddingClient
 from app.services.document_processor import DocumentProcessor
 
@@ -45,20 +39,18 @@ class KnowledgeBaseUploadService:
       category: str | None,
   ) -> dict:
     """
-    上传知识库文档（多文档模式）。
+    上传知识库文档（单文件模式，与 Java 版一致）。
 
     流程：
     1. 计算文件 hash 检测重复
     2. 创建知识库记录
-    3. 创建文档记录并 flush 以获取主键
-    4. 上传到 S3
-    5. 解析文本
-    6. 同步向量化
-    7. commit
+    3. 上传到 S3
+    4. 解析文本
+    5. 同步向量化（写入 vector_store 表）
+    6. commit
     """
     file_hash = compute_sha256(content)
     file_size = len(content)
-    file_type = Path(filename).suffix.lower().lstrip(".")
 
     # 检测重复（按 hash）
     existing = await self.kb_repo.find_by_hash(file_hash)
@@ -75,35 +67,11 @@ class KnowledgeBaseUploadService:
         content_type=content_type,
         category=category,
         vector_status=VectorStatus.PENDING.value,
-        doc_count=0,
-        status=KnowledgeBaseStatus.ACTIVE.value,
     )
     kb_saved = await self.kb_repo.save(kb_entity)
 
-    # 创建文档记录
-    doc_uuid = str(uuid4())
-    safe_filename = Path(filename).name
-    storage_key = generate_storage_key("knowledgebase", filename)
-
-    doc_entity = KnowledgeDocumentEntity(
-        doc_id=doc_uuid,
-        kb_id=kb_saved.id,
-        filename=safe_filename,
-        file_key=storage_key,
-        file_size=file_size,
-        file_type=file_type,
-        status=VectorStatus.PROCESSING.value,
-        chunk_count=0,
-    )
-    kb_saved.doc_count = (kb_saved.doc_count or 0) + 1
-
-    # 必须先将 doc_entity 加入 session 并 flush/refresh，获取数据库生成的主键
-    self.kb_repo.session.add(doc_entity)
-    await self.kb_repo.session.flush()
-    await self.kb_repo.session.refresh(doc_entity)
-    log.info("[upload] doc_entity saved, id=%d", doc_entity.id)
-
     # 上传到 S3
+    storage_key = generate_storage_key("knowledgebase", filename)
     await upload_file(content, storage_key, content_type)
     log.info(
         "[upload] put_object success bucket=%s key=%s",
@@ -115,19 +83,16 @@ class KnowledgeBaseUploadService:
 
     # 解析文本
     resume_text = await parse_document(content, content_type, filename)
-    kb_saved.content_text = resume_text
 
-    # 同步向量化
+    # 同步向量化（写入 vector_store 表）
     try:
-      await self._process_document(doc_entity, resume_text, kb_saved.id)
+      chunk_count = await self._vectorize_text(resume_text, kb_saved.id)
+      kb_saved.vector_status = VectorStatus.COMPLETED.value
+      kb_saved.chunk_count = chunk_count
     except Exception as exc:
-      # 设置失败状态（flush 使修改持久化），然后让异常继续传播
-      # rollback 由 get_db 的异常处理统一执行，此处不重复 rollback
-      doc_entity.status = VectorStatus.FAILED.value
-      doc_entity.error_message = str(exc)[:1000]
       kb_saved.vector_status = VectorStatus.FAILED.value
       kb_saved.vector_error = str(exc)[:500]
-      log.error("[upload] 向量化失败 kbId=%d docId=%d: %s", kb_saved.id, doc_entity.id, exc)
+      log.error("[upload] 向量化失败 kbId=%d: %s", kb_saved.id, exc)
       await self.kb_repo.session.flush()
       raise
 
@@ -139,85 +104,31 @@ class KnowledgeBaseUploadService:
         "name": kb_saved.name,
     }
 
-  async def upload_document(
-      self,
-      kb_id: int,
-      filename: str,
-      content: bytes,
-      file_type: str,
-  ) -> KnowledgeDocumentEntity:
-    """
-    向已有知识库添加文档（多文档模式）。
+  async def upload_document(self, kb_id: int, filename: str, content: bytes, file_type: str) -> None:
+    """multi-document 模式已移除，待后续实现。"""
+    raise NotImplementedError("多文档模式尚未支持")
 
-    流程：
-    1. 获取知识库
-    2. 创建文档记录并 flush 以获取主键
-    3. 上传到 S3
-    4. 解析文本
-    5. 同步向量化
-    6. flush
-    """
-    kb_entity = await self.kb_repo.find_by_id(kb_id)
-    if kb_entity is None:
-      raise ValueError(f"知识库不存在: {kb_id}")
-    if kb_entity.status != KnowledgeBaseStatus.ACTIVE.value:
-      raise ValueError("知识库已停用")
+  async def delete_document(self, kb_id: int, doc_id: str) -> None:
+    """multi-document 模式已移除，待后续实现。"""
+    raise NotImplementedError("多文档模式尚未支持")
 
-    doc_uuid = str(uuid4())
-    safe_filename = Path(filename).name
-    storage_key = f"kb/{kb_id}/{doc_uuid}/{safe_filename}"
+  async def reprocess_document(self, kb_id: int, doc_id: str) -> None:
+    """multi-document 模式已移除，待后续实现。"""
+    raise NotImplementedError("多文档模式尚未支持")
 
-    doc_entity = KnowledgeDocumentEntity(
-        doc_id=doc_uuid,
-        kb_id=kb_id,
-        filename=safe_filename,
-        file_key=storage_key,
-        file_size=len(content),
-        file_type=file_type,
-        status=VectorStatus.PROCESSING.value,
-        chunk_count=0,
-    )
-    kb_entity.doc_count = (kb_entity.doc_count or 0) + 1
+  async def list_documents(self, kb_id: int) -> list:
+    """multi-document 模式已移除，返回空列表。"""
+    return []
 
-    # 必须先将 doc_entity 加入 session 并 flush/refresh，获取数据库生成的主键
-    self.kb_repo.session.add(doc_entity)
-    await self.kb_repo.session.flush()
-    await self.kb_repo.session.refresh(doc_entity)
-    log.info("[upload_document] doc_entity saved, id=%d", doc_entity.id)
+  async def get_document(self, kb_id: int, doc_id: str) -> None:
+    """multi-document 模式已移除，待后续实现。"""
+    return None
 
-    # 上传到 S3
-    await upload_file(content, storage_key, self._content_type(file_type))
-    log.info(
-        "[upload_document] put_object success bucket=%s key=%s",
-        _get_storage_bucket(),
-        storage_key,
-    )
+  async def _vectorize_text(self, text: str, kb_id: int) -> int:
+    """将文本分块并向量化，写入 vector_store 表（与 Java Spring AI 一致）。"""
+    if not text or not text.strip():
+      raise ValueError("文档中没有可向量化的内容")
 
-    # 解析文本
-    text = await parse_document(content, self._content_type(file_type), filename)
-
-    # 同步向量化
-    try:
-      await self._process_document(doc_entity, text, kb_id)
-    except Exception as exc:
-      # 设置失败状态（flush 使修改持久化），然后让异常继续传播
-      # rollback 由 get_db 的异常处理统一执行
-      doc_entity.status = VectorStatus.FAILED.value
-      doc_entity.error_message = str(exc)[:1000]
-      log.error("[upload_document] 向量化失败 kbId=%d docId=%d: %s", kb_id, doc_entity.id, exc)
-      await self.kb_repo.session.flush()
-      raise
-
-    await self.kb_repo.session.flush()
-    return doc_entity
-
-  async def _process_document(
-      self,
-      document: KnowledgeDocumentEntity,
-      text: str,
-      kb_id: int,
-  ) -> None:
-    """同步向量化文档。"""
     chunks = self._document_processor.split_into_chunks(
         text, self._chunk_size, self._chunk_overlap
     )
@@ -225,55 +136,41 @@ class KnowledgeBaseUploadService:
       raise ValueError("文档中没有可向量化的内容")
 
     embeddings = await self._embedding_client.embed_batch(chunks)
-    if len(embeddings) != len(chunks):
-      raise ValueError("Embedding 返回数量与文本块数量不一致")
+    if not embeddings:
+      raise ValueError("Embedding 返回结果为空")
 
+    # embed_batch 内部会过滤空块，用实际返回数量写入
+    valid_chunks = [c for c in chunks if isinstance(c, str) and c.strip()]
     self.kb_repo.session.add_all([
-        KnowledgeChunkEntity(
-            doc_id=document.id,
-            kb_id=kb_id,
-            content=content,
-            chunk_index=index,
-            embedding=embeddings[index],
+        VectorStoreEntity(
+            id=str(uuid4()),
+            content=valid_chunks[idx],
+            metadata_={"kb_id": str(kb_id)},
+            embedding=embeddings[idx],
         )
-        for index, content in enumerate(chunks)
+        for idx in range(len(embeddings))
     ])
-
-    document.chunk_count = len(chunks)
-    document.status = VectorStatus.COMPLETED.value
-    document.error_message = None
-
-    # 更新知识库的向量状态
-    kb = await self.kb_repo.find_by_id(kb_id)
-    if kb:
-      kb.vector_status = VectorStatus.COMPLETED.value
-      kb.chunk_count = (kb.chunk_count or 0) + len(chunks)
-
     await self.kb_repo.session.flush()
+    return len(embeddings)
 
   async def delete_kb(self, kb_id: int) -> None:
     from sqlalchemy import delete
-    kb_entity = await self.kb_repo.find_by_id_with_documents(kb_id)
+    kb_entity = await self.kb_repo.find_by_id(kb_id)
     if kb_entity is None:
       return
 
-    # 删除 RAG 会话中的知识库关联（必须先于 KB 删除，否则外键约束阻止）
+    # 删除 RAG 会话中的知识库关联
     await self._remove_rag_session_associations(kb_id)
 
-    # 删除关联文档的文件
-    for doc in kb_entity.documents:
-      try:
-        await delete_file(doc.file_key)
-      except Exception as e:
-        log.warning("S3 delete failed for doc %s: %s", doc.doc_id, e)
-
-    # 删除向量数据（chunks 通过 CASCADE 自动级联删除）
+    # 删除向量数据（vector_store 表中 metadata->>'kb_id' 匹配的记录）
     try:
       await self.kb_repo.session.execute(
-          delete(KnowledgeChunkEntity).where(KnowledgeChunkEntity.kb_id == kb_id)
+          delete(VectorStoreEntity).where(
+              VectorStoreEntity.metadata_["kb_id"].astext == str(kb_id)
+          )
       )
     except Exception as e:
-      log.warning("Delete chunks failed for KB %d: %s", kb_id, e)
+      log.warning("Delete vectors failed for KB %d: %s", kb_id, e)
 
     # 删除知识库文件
     if kb_entity.storage_key:
@@ -285,8 +182,9 @@ class KnowledgeBaseUploadService:
     await self.kb_repo.delete(kb_id)
 
   async def _remove_rag_session_associations(self, kb_id: int) -> None:
-    from sqlalchemy import select, update
+    from sqlalchemy import select
     from app.models.knowledge_base import RagChatSessionEntity
+    from sqlalchemy.orm import selectinload
 
     result = await self.kb_repo.session.execute(
         select(RagChatSessionEntity)
@@ -302,123 +200,7 @@ class KnowledgeBaseUploadService:
     if sessions:
       log.info("Removed KB %d from %d RAG sessions", kb_id, len(sessions))
 
-  async def delete_document(self, kb_id: int, doc_id: str) -> None:
-    """删除知识库下的单个文档。"""
-    from sqlalchemy import delete
-    kb_entity = await self.kb_repo.find_by_id_with_documents(kb_id)
-    if kb_entity is None:
-      return
 
-    # 找到文档
-    doc_to_delete = None
-    for doc in kb_entity.documents:
-      if doc.doc_id == doc_id:
-        doc_to_delete = doc
-        break
-
-    if doc_to_delete:
-      # 删除文件
-      try:
-        await delete_file(doc_to_delete.file_key)
-      except Exception as e:
-        log.warning("S3 delete failed for doc %s: %s", doc_id, e)
-
-      # 删除 chunks
-      await self.kb_repo.session.execute(
-          delete(KnowledgeChunkEntity).where(KnowledgeChunkEntity.doc_id == doc_to_delete.id)
-      )
-
-      # 删除文档记录
-      await self.kb_repo.session.delete(doc_to_delete)
-
-      # 更新 doc_count
-      kb_entity.doc_count = max((kb_entity.doc_count or 1) - 1, 0)
-      await self.kb_repo.session.flush()
-
-  async def reprocess_document(self, kb_id: int, doc_id: str) -> KnowledgeDocumentEntity:
-    """重新处理文档。"""
-    from sqlalchemy import delete, select
-    kb_entity = await self.kb_repo.find_by_id_with_documents(kb_id)
-    if kb_entity is None:
-      raise ValueError(f"知识库不存在: {kb_id}")
-
-    doc_entity = None
-    for doc in kb_entity.documents:
-      if doc.doc_id == doc_id:
-        doc_entity = doc
-        break
-
-    if doc_entity is None:
-      raise ValueError(f"文档不存在: {doc_id}")
-
-    # 重置状态
-    doc_entity.status = VectorStatus.PROCESSING.value
-    doc_entity.error_message = None
-    old_chunk_count = doc_entity.chunk_count or 0
-    doc_entity.chunk_count = 0
-
-    # 删除旧 chunks
-    await self.kb_repo.session.execute(
-        delete(KnowledgeChunkEntity).where(KnowledgeChunkEntity.doc_id == doc_entity.id)
-    )
-
-    # 下载文件
-    log.info(
-        "[reprocess] attempting get_object bucket=%s key=%s",
-        _get_storage_bucket(),
-        doc_entity.file_key,
-    )
-    try:
-      from app.infrastructure.storage.file_storage import download_file
-      file_data, _ = await download_file(doc_entity.file_key)
-    except Exception as exc:
-      log.error(
-          "[reprocess] get_object failed bucket=%s key=%s error=%s",
-          _get_storage_bucket(),
-          doc_entity.file_key,
-          exc,
-      )
-      raise ValueError(f"文件下载失败: {doc_entity.file_key}") from exc
-
-    log.info(
-        "[reprocess] get_object success bucket=%s key=%s size=%d",
-        _get_storage_bucket(),
-        doc_entity.file_key,
-        len(file_data),
-    )
-
-    # 解析并向量化
-    try:
-      text = await parse_document(file_data, self._content_type(doc_entity.file_type), doc_entity.filename)
-      await self._process_document(doc_entity, text, kb_id)
-    except Exception as exc:
-      doc_entity.status = VectorStatus.FAILED.value
-      doc_entity.error_message = str(exc)[:1000]
-      await self.kb_repo.session.flush()
-      raise ValueError(f"文档处理失败: {str(exc)}") from exc
-
-    # 更新知识库的 chunk_count
-    kb_entity.chunk_count = max((kb_entity.chunk_count or 0) - old_chunk_count + doc_entity.chunk_count, 0)
-    await self.kb_repo.session.flush()
-    await self.kb_repo.session.refresh(doc_entity)
-    return doc_entity
-
-  async def list_documents(self, kb_id: int) -> list[KnowledgeDocumentEntity]:
-    """列出知识库下的所有文档。"""
-    kb_entity = await self.kb_repo.find_by_id_with_documents(kb_id)
-    if kb_entity is None:
-      raise ValueError(f"知识库不存在: {kb_id}")
-    return kb_entity.documents
-
-  async def get_document(self, kb_id: int, doc_id: str) -> KnowledgeDocumentEntity | None:
-    """获取单个文档。"""
-    kb_entity = await self.kb_repo.find_by_id_with_documents(kb_id)
-    if kb_entity is None:
-      return None
-    for doc in kb_entity.documents:
-      if doc.doc_id == doc_id:
-        return doc
-    return None
 
   @staticmethod
   def _content_type(file_type: str) -> str:

@@ -43,6 +43,8 @@ interface UnifiedInterviewItem {
   actualDuration?: number;
   createdAt: string;
   resumeId?: number;
+  knowledgeBaseId?: number;
+  interviewCategory?: string | null;
   voiceSessionId?: string;
 }
 
@@ -175,6 +177,7 @@ interface InterviewHistoryPageProps {
   onViewInterview: (sessionId: string, resumeId?: number) => void;
   onRestartInterview?: (resumeId: number) => void;
   onContinueInterview?: (sessionId: string) => void;
+  knowledgeBaseId?: number;
 }
 
 /** Shallow comparison for polling change-detection */
@@ -188,8 +191,15 @@ function itemsEqual(a: UnifiedInterviewItem[], b: UnifiedInterviewItem[]): boole
   return true;
 }
 
-export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview, onRestartInterview, onContinueInterview }: InterviewHistoryPageProps) {
+export default function InterviewHistoryPage({
+  onBack: _onBack,
+  onViewInterview,
+  onRestartInterview,
+  onContinueInterview,
+  knowledgeBaseId,
+}: InterviewHistoryPageProps) {
   const navigate = useNavigate();
+  const isKnowledgeBaseView = knowledgeBaseId !== undefined;
   const [items, setItems] = useState<UnifiedInterviewItem[]>([]);
   const [stats, setStats] = useState<InterviewStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -212,8 +222,10 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
         : skillApi.listSkills().catch(() => [] as SkillDTO[]);
       const [loadedSkills, textSessions, voiceSessions] = await Promise.all([
         skillsPromise,
-        interviewApi.listSessions().catch(() => [] as TextSessionMeta[]),
-        voiceInterviewApi.getAllSessions().catch(() => [] as SessionMeta[]),
+        interviewApi.listSessions(knowledgeBaseId).catch(() => [] as TextSessionMeta[]),
+        isKnowledgeBaseView
+          ? Promise.resolve([] as SessionMeta[])
+          : voiceInterviewApi.getAllSessions().catch(() => [] as SessionMeta[]),
       ]);
       if (!skillsLoadedRef.current) {
         skillsRef.current = loadedSkills;
@@ -253,7 +265,7 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
     } finally {
       if (!isPolling) setLoading(false);
     }
-  }, []);
+  }, [isKnowledgeBaseView, knowledgeBaseId]);
 
   function mapTextInterviews(sessions: TextSessionMeta[], skills: SkillDTO[]): UnifiedInterviewItem[] {
     return sessions.map((session: TextSessionMeta) => ({
@@ -268,6 +280,8 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
       totalQuestions: session.totalQuestions,
       createdAt: session.createdAt,
       resumeId: session.resumeId ?? undefined,
+      knowledgeBaseId: session.knowledgeBaseId ?? undefined,
+      interviewCategory: session.interviewCategory ?? null,
     }));
   }
 

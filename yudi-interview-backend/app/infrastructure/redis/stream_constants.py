@@ -17,15 +17,22 @@ VOICE_EVALUATE_STREAM_KEY = "voice:evaluate:stream"
 VOICE_EVALUATE_GROUP_NAME = "voice-evaluate-group"
 VOICE_EVALUATE_CONSUMER_PREFIX = "voice-evaluate-consumer-"
 
+KB_QUESTION_GEN_STREAM_KEY = "knowledgebase:question-gen:stream"
+KB_QUESTION_GEN_GROUP_NAME = "question-gen-group"
+KB_QUESTION_GEN_CONSUMER_PREFIX = "question-gen-consumer-"
+
 MAX_RETRY_COUNT = 3
 BATCH_SIZE = 10
 POLL_INTERVAL_MS = 1000
 STREAM_MAX_LEN = 1000
+PENDING_IDLE_TIMEOUT_MS = 5 * 60 * 1000
+PENDING_CLAIM_BATCH_SIZE = 10
 
 FIELD_RESUME_ID = "resumeId"
 FIELD_CONTENT = "content"
 FIELD_RETRY_COUNT = "retryCount"
 FIELD_KB_ID = "kbId"
+FIELD_TASK_ID = "taskId"
 FIELD_SESSION_ID = "sessionId"
 FIELD_VOICE_SESSION_ID = "voiceSessionId"
 FIELD_ENQUEUED_AT_NS = "enqueuedAtNs"

@@ -21,6 +21,9 @@ export interface TextSessionMeta {
   evaluateStatus: string | null;
   evaluateError: string | null;
   overallScore: number | null;
+  sourceType: string | null;
+  knowledgeBaseId: number | null;
+  interviewCategory?: string | null;
   createdAt: string;
   completedAt: string | null;
 }
@@ -51,6 +54,8 @@ interface BackendSession {
   is_fallback?: boolean;
   fallback_reason?: string | null;
   generation_mode?: string;
+  knowledge_base_id?: number | null;
+  interview_category?: string | null;
 }
 
 interface BackendQuestion {
@@ -116,6 +121,8 @@ function fromBackendSession(s: BackendSession): InterviewSession {
     isFallback: s.is_fallback,
     fallbackReason: s.fallback_reason,
     generationMode: s.generation_mode,
+    knowledgeBaseId: s.knowledge_base_id,
+    interviewCategory: s.interview_category,
   };
 }
 
@@ -140,9 +147,9 @@ function toBackendCreateRequest(req: CreateInterviewRequest): Record<string, unk
 }
 
 export const interviewApi = {
-  async listSessions(): Promise<TextSessionMeta[]> {
+  async listSessions(knowledgeBaseId?: number): Promise<TextSessionMeta[]> {
     const res = await request.get<BackendSessionItem[]>('/api/interview/sessions');
-    return res.map(s => ({
+    const items: TextSessionMeta[] = res.map(s => ({
       sessionId: s.session_id,
       skillId: s.skill_id,
       difficulty: s.difficulty,
@@ -152,9 +159,30 @@ export const interviewApi = {
       evaluateStatus: s.evaluate_status,
       evaluateError: s.evaluate_error,
       overallScore: s.overall_score,
+      sourceType: null,
+      knowledgeBaseId: null,
+      interviewCategory: null,
       createdAt: s.created_at,
       completedAt: s.completed_at,
     }));
+    if (knowledgeBaseId === undefined) return items;
+
+    const enriched = await Promise.all(items.map(async item => {
+      try {
+        const session = await request.get<BackendSession>(
+          `/api/interview/sessions/${item.sessionId}`
+        );
+        return {
+          ...item,
+          sourceType: session.knowledge_base_id ? 'KNOWLEDGE_BASE' : null,
+          knowledgeBaseId: session.knowledge_base_id ?? null,
+          interviewCategory: session.interview_category ?? null,
+        };
+      } catch {
+        return item;
+      }
+    }));
+    return enriched.filter(item => item.knowledgeBaseId === knowledgeBaseId);
   },
 
   async createSession(req: CreateInterviewRequest): Promise<InterviewSession> {

@@ -61,9 +61,9 @@ class ResumeRepository:
   async def update_access_count(self, resume_id: int) -> None:
     entity = await self.find_by_id(resume_id)
     if entity:
-      from app.utils.timezone_utils import get_beijing_now
+      from app.utils.timezone_utils import get_beijing_now_naive
       entity.access_count = (entity.access_count or 0) + 1
-      entity.last_accessed_at = get_beijing_now()
+      entity.last_accessed_at = get_beijing_now_naive()
 
 
 class ResumeAnalysisRepository:

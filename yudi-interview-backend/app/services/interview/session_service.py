@@ -18,7 +18,7 @@ from app.models.interview_dto import (
 )
 from app.repositories.interview_repository import InterviewAnswerRepository, InterviewRepository
 from app.infrastructure.redis.session_cache import SessionCache
-from app.utils.timezone_utils import get_beijing_now
+from app.utils.timezone_utils import get_beijing_now_naive
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +176,72 @@ class InterviewSessionService:
         generation_mode="fallback_template" if is_fallback else "llm",
     )
 
+  async def create_session_from_questions(
+      self,
+      questions: list[InterviewQuestionDTO | dict[str, Any]],
+      llm_provider: str | None,
+      skill_id: str | None,
+      difficulty: str | None,
+      knowledge_base_id: int | None,
+      interview_category: str | None,
+  ) -> InterviewSessionDTO:
+    if not questions:
+      raise BusinessException(
+          ErrorCode.INTERVIEW_QUESTION_NOT_FOUND,
+          "面试题目不能为空",
+      )
+
+    question_dtos = [
+        question
+        if isinstance(question, InterviewQuestionDTO)
+        else InterviewQuestionDTO.model_validate(question)
+        for question in questions
+    ]
+    session_id = self._generate_session_id()
+    effective_skill_id = skill_id or "java-backend"
+    effective_difficulty = difficulty or "mid"
+
+    entity = InterviewSessionEntity(
+        session_id=session_id,
+        skill_id=effective_skill_id,
+        difficulty=effective_difficulty,
+        source_type="KNOWLEDGE_BASE",
+        knowledge_base_id=knowledge_base_id,
+        interview_category=interview_category,
+        total_questions=len(question_dtos),
+        current_question_index=0,
+        status=SessionStatus.CREATED.value,
+        questions_json=json.dumps(
+            [question.model_dump() for question in question_dtos],
+            ensure_ascii=False,
+        ),
+        llm_provider=llm_provider,
+    )
+    await self.session_repo.save(entity)
+    await self.session_cache.save_session(
+        session_id=session_id,
+        resume_text="",
+        resume_id=None,
+        questions=question_dtos,
+        current_index=0,
+        status=SessionStatus.CREATED.value,
+        knowledge_base_id=knowledge_base_id,
+        interview_category=interview_category,
+        generation_mode="knowledge_base",
+    )
+
+    return InterviewSessionDTO(
+        session_id=session_id,
+        resume_text="",
+        total_questions=len(question_dtos),
+        current_index=0,
+        questions=question_dtos,
+        status=SessionStatus.CREATED.value,
+        generation_mode="knowledge_base",
+        knowledge_base_id=knowledge_base_id,
+        interview_category=interview_category,
+    )
+
   async def get_session(self, session_id: str) -> InterviewSessionDTO:
     cached = await self.session_cache.get_session(session_id)
     if cached:
@@ -214,7 +280,7 @@ class InterviewSessionService:
       entity.status = new_status
       if not has_next:
         from datetime import datetime, timezone
-        entity.completed_at = get_beijing_now()
+        entity.completed_at = get_beijing_now_naive()
         entity.evaluate_status = "PENDING"
 
     q = questions[question_index]
@@ -272,7 +338,7 @@ class InterviewSessionService:
     entity = await self.session_repo.find_by_session_id(session_id)
     if entity:
       entity.status = SessionStatus.COMPLETED.value
-      entity.completed_at = get_beijing_now()
+      entity.completed_at = get_beijing_now_naive()
       entity.evaluate_status = "PENDING"
 
     await self.session_repo.session.commit()
@@ -475,7 +541,11 @@ class InterviewSessionService:
       questions=questions,
       status=entity.status,
       is_fallback=False,
-      generation_mode="llm",
+      generation_mode=(
+          "knowledge_base" if entity.source_type == "KNOWLEDGE_BASE" else "llm"
+      ),
+      knowledge_base_id=entity.knowledge_base_id,
+      interview_category=entity.interview_category,
     )
 
   def _generate_session_id(self) -> str:

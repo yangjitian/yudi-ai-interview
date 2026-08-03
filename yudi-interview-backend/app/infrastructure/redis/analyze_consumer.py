@@ -49,9 +49,9 @@ class AnalyzeStreamConsumer:
         consumer_name or RESUME_ANALYZE_CONSUMER_PREFIX + str(id(self))
     )
     self._running = False
+    self._consume_task: asyncio.Task[None] | None = None
 
   async def start(self) -> None:
-    self._running = True
     client = await get_redis()
     try:
       await client.xgroup_create(
@@ -64,11 +64,20 @@ class AnalyzeStreamConsumer:
       if "BUSYGROUP" not in str(e):
         raise
 
+    self._running = True
     log.info("AnalyzeStreamConsumer started: consumer=%s", self.consumer_name)
-    asyncio.create_task(self._consume_loop())
+    self._consume_task = asyncio.create_task(self._consume_loop())
 
   async def stop(self) -> None:
     self._running = False
+    task = self._consume_task
+    self._consume_task = None
+    if task:
+      task.cancel()
+      try:
+        await task
+      except asyncio.CancelledError:
+        pass
     log.info("AnalyzeStreamConsumer stopped: consumer=%s", self.consumer_name)
 
   async def _consume_loop(self) -> None:
@@ -94,6 +103,8 @@ class AnalyzeStreamConsumer:
                 msg_id,
             )
 
+      except asyncio.CancelledError:
+        raise
       except redis.ResponseError as e:
         if "NOSCRIPT" in str(e):
           log.warning("Lua script not found, clearing script cache")
@@ -101,6 +112,9 @@ class AnalyzeStreamConsumer:
         else:
           log.error("Stream consume error: %s", e)
           await asyncio.sleep(1)
+      except Exception as e:
+        log.error("分析消费循环异常，将在 1 秒后重试: %s", e, exc_info=True)
+        await asyncio.sleep(1)
 
   async def _process_message(
       self, client: redis.Redis, msg_id: str, fields: dict

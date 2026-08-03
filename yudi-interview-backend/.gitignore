@@ -16,7 +16,6 @@ build/
 .env
 .env.local
 .env.*.local
-.env.example
 
 # Logs
 *.log
@@ -26,6 +25,8 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+tests/
+alembic/
 
 # Type check
 .mypy_cache/
@@ -37,5 +38,5 @@ Thumbs.db
 # SQL
 sql/
 
-#Other
-alembic/
+# docs
+docs/

@@ -14,7 +14,7 @@ from app.models.schedule_dto import (
     UpdateScheduleRequest,
 )
 from app.repositories.schedule_repository import ScheduleRepository
-from app.utils.timezone_utils import get_beijing_now, BEIJING_TZ
+from app.utils.timezone_utils import get_beijing_now_naive, to_beijing_naive
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class InterviewScheduleService:
     entity = InterviewScheduleEntity(
         company_name=req.companyName,
         position=req.position,
-        interview_time=req.interviewTime,
+        interview_time=to_beijing_naive(req.interviewTime),
         interview_type=req.interviewType,
         meeting_link=req.meetingLink,
         round_number=req.roundNumber,
@@ -66,7 +66,11 @@ class InterviewScheduleService:
       start: datetime | None,
       end: datetime | None,
   ) -> list[ScheduleDTO]:
-    entities = await self.repo.list_all(status=status, start=start, end=end)
+    entities = await self.repo.list_all(
+        status=status,
+        start=to_beijing_naive(start) if start else None,
+        end=to_beijing_naive(end) if end else None,
+    )
     return [self._to_dto(entity) for entity in entities]
 
   async def update(
@@ -82,6 +86,8 @@ class InterviewScheduleService:
         "roundNumber": "round_number",
     }
     for field, value in values.items():
+      if field == "interviewTime" and value is not None:
+        value = to_beijing_naive(value)
       setattr(entity, field_mapping.get(field, field), value)
     return self._to_dto(await self.repo.update(entity))
 
@@ -97,7 +103,9 @@ class InterviewScheduleService:
     return self._to_dto(await self.repo.update(entity))
 
   async def update_expired(self, cutoff: datetime | None = None) -> int:
-    return await self.repo.update_expired(cutoff or get_beijing_now())
+    return await self.repo.update_expired(
+        to_beijing_naive(cutoff) if cutoff else get_beijing_now_naive()
+    )
 
   async def _get_by_id_or_throw(self, schedule_id: int) -> InterviewScheduleEntity:
     entity = await self.repo.find_by_id(schedule_id)
@@ -169,8 +177,7 @@ class InterviewParseService:
         f"{time_match.group(1).replace('/', '-')} {time_match.group(2)}",
         "%Y-%m-%d %H:%M",
     )
-    # 转换为带时区的北京时间
-    interview_time = interview_time.replace(tzinfo=BEIJING_TZ)
+    # public.sql 使用无时区时间戳，这里保留东八区本地时间语义。
     url_match = _URL_PATTERN.search(raw_text)
     round_match = _ROUND_PATTERN.search(raw_text)
     round_number = self._parse_round(round_match.group(1)) if round_match else 1
