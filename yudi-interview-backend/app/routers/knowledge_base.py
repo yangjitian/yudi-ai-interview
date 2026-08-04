@@ -15,12 +15,19 @@ from pydantic import BaseModel, BeforeValidator, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
+from app.core.constants import KB_MAX_UPLOAD_BYTES
 from app.core.errors import (
     BusinessException,
     ErrorCode,
     RateLimitExceededException,
 )
 from app.core.result import ApiResponse
+from app.core.upload_validation import (
+    KB_EXTENSION_CONTENT_TYPES,
+    check_upload_content_length,
+    read_upload_with_limit,
+    validate_upload_metadata,
+)
 from app.infrastructure.redis.question_generation import (
     QuestionGenStreamProducer,
     cancel_running_question_generation,
@@ -386,19 +393,36 @@ async def delete_question(
 
 @router.post("/upload", response_model=ApiResponse[dict])
 async def upload_document(
+    request: Request,
     file: Annotated[UploadFile, File(description="文档文件")],
     name: Annotated[str, Form(description="文档名称")],
     category: Annotated[str | None, Form(description="分类")] = None,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse:
-  content = await file.read()
+  check_upload_content_length(
+      request,
+      KB_MAX_UPLOAD_BYTES,
+      ErrorCode.FILE_TOO_LARGE,
+  )
+  filename = file.filename or "unknown"
+  validate_upload_metadata(
+      filename,
+      file.content_type,
+      KB_EXTENSION_CONTENT_TYPES,
+      ErrorCode.KNOWLEDGE_BASE_FILE_TYPE_NOT_SUPPORTED,
+  )
+  content = await read_upload_with_limit(
+      file,
+      KB_MAX_UPLOAD_BYTES,
+      ErrorCode.FILE_TOO_LARGE,
+  )
   if not content:
     raise BusinessException(ErrorCode.BAD_REQUEST, "文件内容为空")
 
   upload_svc = KnowledgeBaseUploadService(KbRepository(db))
   result = await upload_svc.upload(
       content=content,
-      filename=file.filename or "unknown",
+      filename=filename,
       name=name,
       content_type=file.content_type,
       category=category,
@@ -732,4 +756,3 @@ async def alias_get_base(
       "chunk_count": entity.chunk_count,
       "vector_error": entity.vector_error,
   })
-

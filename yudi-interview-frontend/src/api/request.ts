@@ -1,4 +1,5 @@
 import axios, { AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig } from 'axios';
+import { formatUploadSizeMessage } from '../utils/fileSize';
 
 /**
  * 后端统一响应结构
@@ -128,7 +129,7 @@ export const request = {
  */
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    return error.message;
+    return formatUploadSizeMessage(error.message);
   }
   return '未知错误';
 }

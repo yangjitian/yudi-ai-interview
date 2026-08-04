@@ -3,6 +3,7 @@ from enum import Enum
 
 class ErrorCode(Enum):
   BAD_REQUEST = (400, "请求参数错误")
+  FILE_TOO_LARGE = (413, "文件大小超过限制")
   UNAUTHORIZED = (401, "未授权")
   FORBIDDEN = (403, "禁止访问")
   NOT_FOUND = (404, "资源不存在")
@@ -37,6 +38,7 @@ class ErrorCode(Enum):
   KNOWLEDGE_BASE_QUERY_FAILED = (6004, "知识库查询失败")
   KNOWLEDGE_BASE_DELETE_FAILED = (6005, "知识库删除失败")
   KNOWLEDGE_BASE_VECTORIZATION_FAILED = (6006, "知识库向量化失败")
+  KNOWLEDGE_BASE_FILE_TYPE_NOT_SUPPORTED = (6007, "不支持的知识库文件类型")
 
   AI_SERVICE_UNAVAILABLE = (7001, "AI服务暂时不可用，请稍后重试")
   AI_SERVICE_TIMEOUT = (7002, "AI服务响应超时")

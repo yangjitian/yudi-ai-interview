@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { knowledgeBaseApi } from '../api/knowledgebase';
+import { getErrorMessage } from '../api/request';
 import type { UploadKnowledgeBaseResponse } from '../api/knowledgebase';
 import FileUploadCard from '../components/FileUploadCard';
 
@@ -20,7 +21,7 @@ export default function KnowledgeBaseUploadPage({ onUploadComplete, onBack }: Kn
       const data = await knowledgeBaseApi.uploadKnowledgeBase(file, name);
       onUploadComplete(data);
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : '上传失败，请重试';
+      const errorMessage = getErrorMessage(err);
       setError(errorMessage);
       setUploading(false);
     }

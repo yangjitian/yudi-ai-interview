@@ -1,13 +1,20 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Path, UploadFile
+from fastapi import APIRouter, Depends, File, Path, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_db
+from app.core.constants import RESUME_MAX_UPLOAD_BYTES
 from app.core.errors import BusinessException, ErrorCode
 from app.core.result import ApiResponse
+from app.core.upload_validation import (
+    RESUME_EXTENSION_CONTENT_TYPES,
+    check_upload_content_length,
+    read_upload_with_limit,
+    validate_upload_metadata,
+)
 from app.infrastructure.pdf.export import PdfExportService
 from app.models.resume_dto import ResumeListItemDTO, ResumeDetailDTO, ResumeUploadResponseDTO
 from app.repositories.interview_repository import InterviewRepository
@@ -27,15 +34,31 @@ router = APIRouter(prefix="/api/resumes", tags=["简历管理"])
 
 @router.post("/upload", response_model=ApiResponse[dict])
 async def upload_and_analyze(
+    request: Request,
     file: Annotated[UploadFile, File(description="简历文件")],
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse:
-  content = await file.read()
+  check_upload_content_length(
+      request,
+      RESUME_MAX_UPLOAD_BYTES,
+      ErrorCode.FILE_TOO_LARGE,
+  )
+  filename = file.filename or "unknown"
+  validate_upload_metadata(
+      filename,
+      file.content_type,
+      RESUME_EXTENSION_CONTENT_TYPES,
+      ErrorCode.RESUME_FILE_TYPE_NOT_SUPPORTED,
+  )
+  content = await read_upload_with_limit(
+      file,
+      RESUME_MAX_UPLOAD_BYTES,
+      ErrorCode.FILE_TOO_LARGE,
+  )
   if not content:
     raise BusinessException(ErrorCode.BAD_REQUEST, "文件内容为空")
 
   file_hash = compute_sha256(content)
-  filename = file.filename or "unknown"
   content_type = file.content_type
 
   parse_svc = ResumeParseService()
