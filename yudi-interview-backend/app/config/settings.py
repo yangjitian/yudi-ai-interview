@@ -442,6 +442,7 @@ class Settings(BaseSettings):
       alias="CORS_ORIGINS",
   )
   app_debug: bool = Field(default=False, alias="APP_DEBUG")
+  app_env: str = Field(default="production", alias="APP_ENV")
   app_upload_dir: Path = Field(default=Path("/tmp/ai-interview/uploads"), alias="APP_UPLOAD_DIR")
   app_interview_follow_up_count: int = Field(default=1, alias="APP_INTERVIEW_FOLLOW_UP_COUNT")
   app_interview_evaluation_batch_size: int = Field(default=8, alias="APP_INTERVIEW_EVALUATION_BATCH_SIZE")
@@ -460,6 +461,10 @@ class Settings(BaseSettings):
   @classmethod
   def validate_cors_origins(cls, value):
     return _parse_cors_origins(value)
+
+  @property
+  def is_production(self) -> bool:
+    return self.app_env.strip().lower() == "production"
 
   @property
   def app(self) -> AppSettings:

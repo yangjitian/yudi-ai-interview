@@ -31,17 +31,29 @@ class ApiKeyEncryptionService:
     def __init__(self, encryption_key: str | None = None):
         if self._initialized:
             return
-        self._initialized = True
 
-        configured_key = encryption_key or os.environ.get("APP_AI_CONFIG_ENCRYPTION_KEY")
+        from app.config.settings import get_settings
+        settings = get_settings()
+        configured_key = (
+            encryption_key
+            or settings.app_ai_config_encryption_key
+            or os.environ.get("APP_AI_CONFIG_ENCRYPTION_KEY")
+        )
         if not configured_key:
+            if settings.is_production:
+                raise RuntimeError(
+                    "APP_AI_CONFIG_ENCRYPTION_KEY must be configured in production; "
+                    "refusing to start"
+                )
             log.warning(
-                "APP_AI_CONFIG_ENCRYPTION_KEY is not configured; "
-                "using development fallback key"
+                "APP_AI_CONFIG_ENCRYPTION_KEY is not configured; using insecure "
+                "DEV_FALLBACK_KEY. This is only allowed outside production and "
+                "production will refuse to start."
             )
             configured_key = DEV_FALLBACK_KEY
 
         self._aesgcm = AESGCM(self._resolve_key_bytes(configured_key))
+        self._initialized = True
 
     def _resolve_key_bytes(self, key: str) -> bytes:
         key = key.strip()
