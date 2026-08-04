@@ -1,5 +1,4 @@
 import logging
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import (
@@ -39,7 +38,6 @@ from app.models.kb_dto import (
     KnowledgeBaseQuestionCategoryCount,
     KnowledgeBaseQuestionDTO,
     KnowledgeBaseQuestionStatus,
-    KnowledgeDocumentDTO,
     QuestionGenerationConfig,
     QuestionGenerationStatusResponse,
     QueryRequest,
@@ -96,21 +94,6 @@ class GenerateKnowledgeBaseQuestionsRequest(BaseModel):
 
 def _empty_string_to_none(value: str | None) -> str | None:
   return None if value == "" else value
-
-
-def _to_document_dto(entity, kb_id: int) -> KnowledgeDocumentDTO:
-  return KnowledgeDocumentDTO(
-      docId=entity.doc_id,
-      kbId=str(kb_id),
-      filename=entity.filename,
-      fileSize=entity.file_size,
-      fileType=entity.file_type,
-      chunkCount=entity.chunk_count or 0,
-      status=entity.status,
-      errorMessage=entity.error_message,
-      createdAt=entity.created_at,
-      updatedAt=entity.updated_at,
-  )
 
 
 def _question_service(db: AsyncSession) -> KnowledgeBaseQuestionService:
@@ -492,72 +475,6 @@ async def delete_document(
   return ApiResponse.success()
 
 
-# ========== 多文档 API（新增，与 knowledge.py 合并）==========
-
-@router.post(
-    "/{kb_id}/documents",
-    response_model=ApiResponse[KnowledgeDocumentDTO],
-)
-async def upload_kb_document(
-    kb_id: int = ApiPath(description="知识库ID"),
-    file: UploadFile = File(description="PDF、DOC、DOCX、TXT、MD 文档"),
-    db: AsyncSession = Depends(get_db),
-) -> ApiResponse:
-  filename = file.filename or "unknown"
-  file_type = Path(filename).suffix.lower().lstrip(".")
-  if file_type not in {"pdf", "docx", "doc", "txt", "md"}:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "仅支持 PDF、DOC、DOCX、TXT、MD 文件")
-  content = await file.read()
-  if not content:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "文件内容不能为空")
-  if len(content) > 50 * 1024 * 1024:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "文件大小不能超过 50MB")
-
-  upload_svc = KnowledgeBaseUploadService(KbRepository(db))
-  entity = await upload_svc.upload_document(kb_id, filename, content, file_type)
-  return ApiResponse.success(data=_to_document_dto(entity, kb_id))
-
-
-@router.get(
-    "/{kb_id}/documents",
-    response_model=ApiResponse[list[KnowledgeDocumentDTO]],
-)
-async def list_kb_documents(
-    kb_id: int = ApiPath(description="知识库ID"),
-    db: AsyncSession = Depends(get_db),
-) -> ApiResponse:
-  upload_svc = KnowledgeBaseUploadService(KbRepository(db))
-  entities = await upload_svc.list_documents(kb_id)
-  return ApiResponse.success(data=[_to_document_dto(e, kb_id) for e in entities])
-
-
-@router.delete(
-    "/{kb_id}/documents/{doc_id}", response_model=ApiResponse[None]
-)
-async def delete_kb_document(
-    kb_id: int = ApiPath(description="知识库ID"),
-    doc_id: str = ApiPath(description="文档业务 ID"),
-    db: AsyncSession = Depends(get_db),
-) -> ApiResponse:
-  upload_svc = KnowledgeBaseUploadService(KbRepository(db))
-  await upload_svc.delete_document(kb_id, doc_id)
-  return ApiResponse.success()
-
-
-@router.post(
-    "/{kb_id}/documents/{doc_id}/reprocess",
-    response_model=ApiResponse[KnowledgeDocumentDTO],
-)
-async def reprocess_kb_document(
-    kb_id: int = ApiPath(description="知识库ID"),
-    doc_id: str = ApiPath(description="文档业务 ID"),
-    db: AsyncSession = Depends(get_db),
-) -> ApiResponse:
-  upload_svc = KnowledgeBaseUploadService(KbRepository(db))
-  entity = await upload_svc.reprocess_document(kb_id, doc_id)
-  return ApiResponse.success(data=_to_document_dto(entity, kb_id))
-
-
 # ========== 查询 API ==========
 
 @router.post("/query", response_model=ApiResponse[QueryResponse])
@@ -816,79 +733,3 @@ async def alias_get_base(
       "vector_error": entity.vector_error,
   })
 
-
-@_alias_router.post("/bases/{kb_id}/documents", response_model=ApiResponse[KnowledgeDocumentDTO])
-async def alias_upload_document(
-    kb_id: str = ApiPath(description="知识库业务ID"),
-    file: UploadFile = File(description="文档"),
-    db: AsyncSession = Depends(get_db),
-) -> ApiResponse:
-  """别名：/api/knowledge/bases/{kb_id}/documents -> /api/knowledge-base/{id}/documents"""
-  try:
-    kb_int_id = int(kb_id)
-  except ValueError:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "无效的知识库ID")
-
-  filename = file.filename or "unknown"
-  file_type = Path(filename).suffix.lower().lstrip(".")
-  if file_type not in {"pdf", "docx", "doc", "txt", "md"}:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "仅支持 PDF、DOC、DOCX、TXT、MD 文件")
-  content = await file.read()
-  if not content:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "文件内容不能为空")
-  if len(content) > 50 * 1024 * 1024:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "文件大小不能超过 50MB")
-
-  upload_svc = KnowledgeBaseUploadService(KbRepository(db))
-  entity = await upload_svc.upload_document(kb_int_id, filename, content, file_type)
-  return ApiResponse.success(data=_to_document_dto(entity, kb_int_id))
-
-
-@_alias_router.get("/bases/{kb_id}/documents", response_model=ApiResponse[list[KnowledgeDocumentDTO]])
-async def alias_list_documents(
-    kb_id: str = ApiPath(description="知识库业务ID"),
-    db: AsyncSession = Depends(get_db),
-) -> ApiResponse:
-  """别名：/api/knowledge/bases/{kb_id}/documents -> /api/knowledge-base/{id}/documents"""
-  try:
-    kb_int_id = int(kb_id)
-  except ValueError:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "无效的知识库ID")
-
-  upload_svc = KnowledgeBaseUploadService(KbRepository(db))
-  entities = await upload_svc.list_documents(kb_int_id)
-  return ApiResponse.success(data=[_to_document_dto(e, kb_int_id) for e in entities])
-
-
-@_alias_router.delete("/bases/{kb_id}/documents/{doc_id}", response_model=ApiResponse[None])
-async def alias_delete_document(
-    kb_id: str = ApiPath(description="知识库业务ID"),
-    doc_id: str = ApiPath(description="文档业务 ID"),
-    db: AsyncSession = Depends(get_db),
-) -> ApiResponse:
-  """别名：/api/knowledge/bases/{kb_id}/documents/{doc_id} -> /api/knowledge-base/{id}/documents/{doc_id}"""
-  try:
-    kb_int_id = int(kb_id)
-  except ValueError:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "无效的知识库ID")
-
-  upload_svc = KnowledgeBaseUploadService(KbRepository(db))
-  await upload_svc.delete_document(kb_int_id, doc_id)
-  return ApiResponse.success()
-
-
-@_alias_router.post("/bases/{kb_id}/documents/{doc_id}/reprocess", response_model=ApiResponse[KnowledgeDocumentDTO])
-async def alias_reprocess_document(
-    kb_id: str = ApiPath(description="知识库业务ID"),
-    doc_id: str = ApiPath(description="文档业务 ID"),
-    db: AsyncSession = Depends(get_db),
-) -> ApiResponse:
-  """别名：/api/knowledge/bases/{kb_id}/documents/{doc_id}/reprocess -> /api/knowledge-base/{id}/documents/{doc_id}/reprocess"""
-  try:
-    kb_int_id = int(kb_id)
-  except ValueError:
-    raise BusinessException(ErrorCode.BAD_REQUEST, "无效的知识库ID")
-
-  upload_svc = KnowledgeBaseUploadService(KbRepository(db))
-  entity = await upload_svc.reprocess_document(kb_int_id, doc_id)
-  return ApiResponse.success(data=_to_document_dto(entity, kb_int_id))

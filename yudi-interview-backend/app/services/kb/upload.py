@@ -104,26 +104,6 @@ class KnowledgeBaseUploadService:
         "name": kb_saved.name,
     }
 
-  async def upload_document(self, kb_id: int, filename: str, content: bytes, file_type: str) -> None:
-    """multi-document 模式已移除，待后续实现。"""
-    raise NotImplementedError("多文档模式尚未支持")
-
-  async def delete_document(self, kb_id: int, doc_id: str) -> None:
-    """multi-document 模式已移除，待后续实现。"""
-    raise NotImplementedError("多文档模式尚未支持")
-
-  async def reprocess_document(self, kb_id: int, doc_id: str) -> None:
-    """multi-document 模式已移除，待后续实现。"""
-    raise NotImplementedError("多文档模式尚未支持")
-
-  async def list_documents(self, kb_id: int) -> list:
-    """multi-document 模式已移除，返回空列表。"""
-    return []
-
-  async def get_document(self, kb_id: int, doc_id: str) -> None:
-    """multi-document 模式已移除，待后续实现。"""
-    return None
-
   async def _vectorize_text(self, text: str, kb_id: int) -> int:
     """将文本分块并向量化，写入 vector_store 表（与 Java Spring AI 一致）。"""
     if not text or not text.strip():

@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.knowledge_base import (
     KnowledgeBaseQuestionEntity,
     KnowledgeBaseStatus,
-    VectorStatus,
 )
 
 
@@ -46,19 +45,6 @@ class KnowledgeBaseDTO(BaseModel):
   skillId: str | None = None
   docCount: int
   status: KnowledgeBaseStatus
-  createdAt: datetime
-  updatedAt: datetime
-
-
-class KnowledgeDocumentDTO(BaseModel):
-  docId: str
-  kbId: str
-  filename: str
-  fileSize: int
-  fileType: str
-  chunkCount: int
-  status: VectorStatus
-  errorMessage: str | None = None
   createdAt: datetime
   updatedAt: datetime
 
