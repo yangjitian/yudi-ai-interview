@@ -350,7 +350,7 @@ class EvaluateStreamConsumer:
       entity.reference_answers_json = json.dumps(report.reference_answers, ensure_ascii=False)
       has_errors = any(qe.eval_status == "FAILED" for qe in report.question_evaluations)
       entity.evaluate_status = (
-          AsyncTaskStatus.COMPLETED_WITH_ERRORS.value if has_errors
+          AsyncTaskStatus.FAILED.value if has_errors
           else AsyncTaskStatus.COMPLETED.value
       )
       await session.commit()

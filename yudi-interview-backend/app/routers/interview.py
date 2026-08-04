@@ -248,12 +248,11 @@ async def evaluation_events(
             terminal = True
           else:
             status = session_entity.evaluate_status or ""
-            if status in {AsyncTaskStatus.COMPLETED.value, AsyncTaskStatus.COMPLETED_WITH_ERRORS.value}:
+            if status == AsyncTaskStatus.COMPLETED.value:
               payload = {
                   "type": "completed",
                   "evaluate_status": status,
                   "overall_score": session_entity.overall_score,
-                  "has_errors": status == AsyncTaskStatus.COMPLETED_WITH_ERRORS.value,
               }
               terminal = True
             elif status == AsyncTaskStatus.FAILED.value:
