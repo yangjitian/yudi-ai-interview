@@ -31,6 +31,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
+from websocket import WebSocketConnectionClosedException, WebSocketTimeoutException
+
 from app.config.settings import get_settings
 
 
@@ -438,21 +440,61 @@ class AsrSession:
             self._callbacks.on_error = on_error
         self._ready = False
         self._ready_event.clear()
-        self._committed_items.clear()
-        self._residual_audio = b""
         await self.connect()
 
     @staticmethod
     def should_recover_connection(ex: Exception) -> bool:
         """判断 ASR 错误是否应该触发重连。"""
-        msg = str(ex) or ""
-        recover_patterns = [
-            "not ready",
-            "connection",
-            "timeout",
-            "session",
-        ]
-        return any(pattern in msg.lower() for pattern in recover_patterns)
+        try:
+            from dashscope.common.error import (
+                ServiceUnavailableError,
+                TimeoutException,
+            )
+        except ImportError:
+            TimeoutException = ()
+            ServiceUnavailableError = ()
+
+        recoverable_types = (
+            TimeoutError,
+            ConnectionError,
+            WebSocketConnectionClosedException,
+            WebSocketTimeoutException,
+            TimeoutException,
+            ServiceUnavailableError,
+        )
+        non_recoverable_types = (
+            AttributeError,
+            TypeError,
+            KeyError,
+            ValueError,
+            ImportError,
+            LookupError,
+            AssertionError,
+        )
+
+        # RuntimeError usually preserves the original websocket/SDK exception via
+        # __cause__, so inspect the whole chain instead of classifying by outer text.
+        seen: set[int] = set()
+        current: Exception | None = ex
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, non_recoverable_types):
+                return False
+            if isinstance(current, recoverable_types):
+                return True
+            current = current.__cause__
+
+        # The SDK rethrows some websocket errors as a plain Exception. Keep only
+        # precise disconnect/timeout messages as a fallback, never "session".
+        msg = str(ex).lower()
+        recover_messages = (
+            "websocket closed due to",
+            "connection timed out",
+            "connection to remote host was lost",
+            "connection is already closed",
+            "socket is already closed",
+        )
+        return any(pattern in msg for pattern in recover_messages)
 
 
 class AsrService:
