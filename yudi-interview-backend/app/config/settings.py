@@ -305,7 +305,8 @@ class VoiceInterviewSettings(BaseSettings):
   asr_filter_filler_words: bool = Field(default=True)
   asr_api_key: str = Field(default="")
 
-  # use_direct_llm_client 配置（ws_handler.py _init_llm_client 使用）
+  # 保留项：主链路（routers/voice_interview.py）固定使用 LlmServiceDirect，
+  # 该开关目前没有读取方，仅为兼容既有 .env 保留。
   use_direct_llm_client: bool = Field(default=False, alias="APP_VOICE_USE_DIRECT_LLM")
 
   # tts_service.py 使用的短名别名（tts_* 指向 app_voice_tts_*）
