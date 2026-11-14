@@ -317,7 +317,9 @@ class VoiceInterviewSettings(BaseSettings):
   tts_language_type: str = Field(default="Chinese")
   tts_speech_rate: float = Field(default=1.0)
   tts_volume: int = Field(default=60)
-  tts_timeout_seconds: int = Field(default=30)
+  # 故意不设默认值：由 _sync_tts_pool_size 回落到 app_voice_tts_timeout_seconds
+  # （APP_VOICE_TTS_TIMEOUT_SECONDS）。若在此写死数值，`or` 短路会让环境变量永远不生效。
+  tts_timeout_seconds: int | None = Field(default=None)
   tts_api_key: str = Field(default="")
   tts_url: str = Field(default="")
 
