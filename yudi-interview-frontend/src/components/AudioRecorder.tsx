@@ -339,7 +339,7 @@ export default function AudioRecorder({
         try {
           const vadInstance = await window.vad.MicVAD.new({
             getStream: async () => stream,
-            onnxWASMBasePath: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/',
+            onnxWASMBasePath: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/',
             baseAssetPath: 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/',
             onSpeechStart: () => {
               if (mountedRef.current && recordingActiveRef.current) onSpeechStart?.();
