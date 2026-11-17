@@ -6,20 +6,20 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # 1. 优先复制依赖定义文件
-# 技巧：利用 Docker 缓存层机制。只要 package.json 不变，这一层就会被缓存，
+# 技巧：利用 Docker 缓存层机制。只要这两个文件不变，这一层就会被缓存，
 # 避免每次构建都重新下载 npm 包，显著加快构建速度。
-COPY package.json pnpm-lock.yaml ./
+COPY package.json package-lock.json ./
 
 # 2. 安装依赖
-# npm install -g pnpm: 全局安装 pnpm 包管理器
-# pnpm install: 安装所有依赖（包括 devDependencies，构建需要 TypeScript、Vite 等）
-# 注意：不使用 --prod 标志，因为构建阶段需要完整的开发环境
-RUN npm install -g pnpm && pnpm install
+# npm ci: 严格按 package-lock.json 安装，保证镜像里装的版本和本地一致；
+# 如果 package.json 与锁文件不同步会直接报错，避免静默装出另一套版本。
+# 注意：不使用 --omit=dev，因为构建阶段需要 typescript、vite 等开发依赖。
+RUN npm ci
 
 # 3. 复制源代码并构建
 COPY . .
-# 执行构建命令 (vite build)，生成的静态文件会存放在 /app/dist 目录
-RUN pnpm build
+# 执行构建命令 (tsc + vite build)，生成的静态文件会存放在 /app/dist 目录
+RUN npm run build
 
 # ==============================================================================
 # 第二阶段：生产环境 (Production Stage)

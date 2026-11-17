@@ -10,6 +10,10 @@ lerna-debug.log*
 # Dependencies
 node_modules
 
+# 包管理器统一用 npm（Dockerfile 走 npm ci），pnpm 的锁文件与工作区配置不再入库
+pnpm-lock.yaml
+pnpm-workspace.yaml
+
 # Build outputs
 dist
 dist-ssr

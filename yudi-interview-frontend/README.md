@@ -20,9 +20,11 @@ npm run preview    # 本地预览构建产物
 
 构建产物按依赖拆分了 chunk（React、UI 组件、语法高亮各一组），避免单个包过大。
 
-## 关于包管理器
+## 包管理器
 
-仓库里同时存在 `package-lock.json` 与 `pnpm-lock.yaml`，而 `Dockerfile` 的构建阶段固定使用 **pnpm**。本地用哪个都能跑，但**改完依赖后请同步更新 `pnpm-lock.yaml`**，否则容器构建会退回旧版本。
+统一使用 **npm**，锁文件是 `package-lock.json`。容器构建走 `npm ci`，严格按锁文件安装，保证镜像里装的版本和本地一致；`package.json` 与锁文件不同步时会直接失败，不会静默装出另一套版本。
+
+原有的 `pnpm-lock.yaml` 与 `pnpm-workspace.yaml` 已移除并在 `.gitignore` 中屏蔽，避免两份锁文件长期漂移。新增依赖请用 `npm install <pkg>`，不要用 pnpm，否则会重新生成被忽略的锁文件、反而让本地与镜像分叉。
 
 ## 语音相关说明
 
