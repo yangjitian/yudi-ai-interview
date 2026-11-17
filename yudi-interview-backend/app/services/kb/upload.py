@@ -8,7 +8,10 @@ from app.models.knowledge_base import (
     VectorStatus,
     VectorStoreEntity,
 )
-from app.repositories.kb_repository import KbRepository
+from app.repositories.kb_repository import (
+    KbRepository,
+    KnowledgeBaseQuestionRepository,
+)
 from app.infrastructure.parser.document_parser import parse_document
 from app.infrastructure.ai.embedding_client import EmbeddingClient
 from app.services.document_processor import DocumentProcessor
@@ -23,8 +26,15 @@ def _get_storage_bucket() -> str:
 
 
 class KnowledgeBaseUploadService:
-  def __init__(self, kb_repo: KbRepository):
+  def __init__(
+      self,
+      kb_repo: KbRepository,
+      question_repo: KnowledgeBaseQuestionRepository | None = None,
+  ):
     self.kb_repo = kb_repo
+    self.question_repo = question_repo or KnowledgeBaseQuestionRepository(
+        kb_repo.session
+    )
     self._embedding_client = EmbeddingClient()
     self._document_processor = DocumentProcessor()
     self._chunk_size = 500
@@ -158,6 +168,11 @@ class KnowledgeBaseUploadService:
         await delete_file(kb_entity.storage_key)
       except Exception as e:
         log.warning("S3 delete failed for KB %d: %s", kb_id, e)
+
+    # 删除题库中挂在该知识库下的题目。
+    # 子表 knowledge_base_questions 对 knowledge_bases 的外键是 ON DELETE NO ACTION，
+    # 且 ORM 层没有为这个关系配置级联；不先清子表行，删知识库会被外键约束拒绝。
+    await self.question_repo.delete_by_knowledge_base_id(kb_id)
 
     await self.kb_repo.delete(kb_id)
 
