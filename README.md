@@ -37,7 +37,7 @@
 ```mermaid
 flowchart LR
     U["Browser SPA"] -->|"REST"| R["FastAPI Routers"]
-    U -->|"WebSocket audio"| W["Voice WS Handler"]
+    U -->|"WebSocket audio"| W["Voice WebSocket Endpoint"]
     R -->|"SSE status"| U
     R --> S["Service Layer"]
     W --> A["Realtime ASR"]
@@ -55,7 +55,7 @@ flowchart LR
     G --> P
 ```
 
-后端按路由、业务服务、数据访问、模型四层组织，AI 客户端、Redis、对象存储与文档解析放在基础设施层，配置与日志集中在配置层。语音面试不经过普通 REST 路径，而是走独立的 WebSocket 处理器：音频帧和 token 流的节奏与请求响应完全不同，混在一起会让两者的超时与背压互相牵连。耗时在分钟级的模型任务（简历分析、面试评估）不在请求生命周期内执行，改由 Redis Stream 投递，应用启动时挂载的后台消费者负责执行，前端通过 SSE 观察状态变化。检索被单独抽成一层，让问答、知识库面试和题目生成共用同一套召回逻辑。
+后端按路由、业务服务、数据访问、模型四层组织，AI 客户端、Redis、对象存储与文档解析放在基础设施层，配置与日志集中在配置层。语音面试的音频不走 REST，而是单独一条 WebSocket 通路：音频帧和 token 流的节奏与请求响应完全不同，混在一起会让两者的超时与背压互相牵连。耗时在分钟级的模型任务（简历分析、面试评估）不在请求生命周期内执行，改由 Redis Stream 投递，应用启动时挂载的后台消费者负责执行，前端通过 SSE 观察状态变化。检索被单独抽成一层，让问答、知识库面试和题目生成共用同一套召回逻辑。
 
 ## 核心设计与技术挑战
 
@@ -67,7 +67,7 @@ flowchart LR
 ### 异步任务的状态外置
 
 - 挑战：简历分析、面试评估都依赖大模型，耗时不可预测。放进请求里会超时，放进进程内队列会在重启或扩容时丢任务。
-- 思路：用 Redis Stream 消费组承载任务，投递、消费确认、超时消息认领与重试次数都记录在流上，进程崩溃后消息仍可被其他消费者接手。任务状态持久化到数据库，作为唯一可信来源；评估进度通过 SSE 推送状态变化，前端不需要轮询。
+- 思路：用 Redis Stream 消费组承载任务，投递、消费确认与重试计数都记录在流上，进程崩溃后未被确认的消息仍可被其他消费者接手；其中评估与题目生成这两类最需要自动恢复的任务，消费者还会周期性认领超时未确认的消息。任务状态持久化到数据库，作为唯一可信来源；评估进度通过 SSE 推送状态变化，前端不需要轮询。
 
 ### 检索质量的三处修正
 
@@ -89,9 +89,16 @@ flowchart LR
 环境要求：Python 3.12 及以上；PostgreSQL 并启用 pgvector；Redis；S3 兼容对象存储；可用的模型与语音服务凭证。
 
 ```bash
+# 后端（在仓库根目录执行）
 cd yudi-interview-backend
+cp .env.example .env          # 填入数据库、Redis、对象存储与模型凭证
 pip install -e ".[dev]"
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# 前端（另开一个终端，回到仓库根目录再执行）
+cd yudi-interview-frontend
+npm install
+npm run dev
 ```
 
-配置从 `yudi-interview-backend/.env` 读取，变量名参考同目录的 `.env.example`。至少需要：`DB_HOST`、`DB_PORT`、`DB_NAME`、`DB_USERNAME`、`DB_PASSWORD`、`REDIS_HOST`、`REDIS_PORT`、`STORAGE_ENDPOINT`、`STORAGE_ACCESS_KEY`、`STORAGE_SECRET_KEY`、`STORAGE_BUCKET`、`AI_BAILIAN_API_KEY`、`CORS_ORIGINS`；生产环境还需要 `APP_AI_CONFIG_ENCRYPTION_KEY`。表结构在应用启动时由模型定义创建。前端是独立的 Vite 应用，开发服务器把 `/api` 代理到后端。
+配置从后端目录下的 `.env` 读取，变量名与含义参考同目录的 `.env.example`。至少需要：`DB_HOST`、`DB_PORT`、`DB_NAME`、`DB_USERNAME`、`DB_PASSWORD`、`REDIS_HOST`、`REDIS_PORT`、`STORAGE_ENDPOINT`、`STORAGE_ACCESS_KEY`、`STORAGE_SECRET_KEY`、`STORAGE_BUCKET`、`AI_BAILIAN_API_KEY`、`CORS_ORIGINS`。生产环境还必须提供 `APP_AI_CONFIG_ENCRYPTION_KEY`：供应商密钥以加密形式入库，缺少主密钥时服务会直接拒绝启动，而不是退化成明文。数据库需预先启用 pgvector 扩展，其余表结构在应用启动时按模型定义创建。
